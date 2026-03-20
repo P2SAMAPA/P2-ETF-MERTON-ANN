@@ -80,29 +80,42 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     print(f"Token length: {len(HF_TOKEN) if HF_TOKEN else 0}")
 
     try:
-        # Download parquet files
-        prices_path = hf_hub_download(
-            repo_id=HF_DATASET_REPO,
-            filename=f"data/{module}.parquet",
-            token=HF_TOKEN
-        )
+        # Use HfApi to download file content directly
+        api = HfApi(token=HF_TOKEN)
 
+        # Download prices file
+        print(f"Downloading data/{module}.parquet...")
+        prices_path = f"/tmp/{module}_prices.parquet"
+        api.download_file(
+            path_in_repo=f"data/{module}.parquet",
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset",
+            local_path=prices_path
+        )
         prices = pd.read_parquet(prices_path)
+        print(f"✓ Loaded prices: {prices.shape}")
 
         # Try to load FRED data
         try:
-            fred_path = hf_hub_download(
+            print("Downloading data/fred_macro.parquet...")
+            fred_path = "/tmp/fred_macro.parquet"
+            api.download_file(
+                path_in_repo="data/fred_macro.parquet",
                 repo_id=HF_DATASET_REPO,
-                filename="data/fred_macro.parquet",
-                token=HF_TOKEN
+                repo_type="dataset",
+                local_path=fred_path
             )
             fred_df = pd.read_parquet(fred_path)
-        except:
+            print(f"✓ Loaded FRED data: {fred_df.shape}")
+        except Exception as e:
+            print(f"⚠ FRED data not available: {e}")
             fred_df = pd.DataFrame()
 
         return prices, fred_df
     except Exception as e:
-        print(f"Error loading data: {e}")
+        print(f"✗ Error loading data: {e}")
+        import traceback
+        print(traceback.format_exc())
         # Return empty DataFrames as fallback
         return pd.DataFrame(), pd.DataFrame()
 
@@ -267,11 +280,11 @@ def save_signal_to_hf(signal: Dict, module: str):
     print(f"Repo: {HF_DATASET_REPO}")
     print(f"Token available: {'Yes (len=%d)' % len(HF_TOKEN) if HF_TOKEN else 'No'}")
 
-    # Check signal validity
+    # Check signal validity - don't save error signals
     if not signal or 'error' in signal:
-        print(f"⚠ WARNING: Signal for {module} is empty or contains error")
+        print(f"✗ ERROR: Signal for {module} failed - not saving to HF")
         print(f"Signal content: {signal}")
-        return
+        raise ValueError(f"Cannot save error signal for {module}: {signal.get('error', 'Unknown error')}")
 
     try:
         api = HfApi(token=HF_TOKEN)
