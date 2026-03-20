@@ -80,17 +80,15 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     print(f"Token length: {len(HF_TOKEN) if HF_TOKEN else 0}")
 
     try:
-        # Use HfApi to download file content directly
-        api = HfApi(token=HF_TOKEN)
-
-        # Download prices file
+        # Download prices file using hf_hub_download function
         print(f"Downloading data/{module}.parquet...")
-        prices_path = f"/tmp/{module}_prices.parquet"
-        api.download_file(
-            path_in_repo=f"data/{module}.parquet",
+        prices_path = hf_hub_download(
             repo_id=HF_DATASET_REPO,
+            filename=f"data/{module}.parquet",
             repo_type="dataset",
-            local_path=prices_path
+            token=HF_TOKEN,
+            local_dir="/tmp",
+            local_dir_use_symlinks=False
         )
         prices = pd.read_parquet(prices_path)
         print(f"✓ Loaded prices: {prices.shape}")
@@ -98,12 +96,13 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         # Try to load FRED data
         try:
             print("Downloading data/fred_macro.parquet...")
-            fred_path = "/tmp/fred_macro.parquet"
-            api.download_file(
-                path_in_repo="data/fred_macro.parquet",
+            fred_path = hf_hub_download(
                 repo_id=HF_DATASET_REPO,
+                filename="data/fred_macro.parquet",
                 repo_type="dataset",
-                local_path=fred_path
+                token=HF_TOKEN,
+                local_dir="/tmp",
+                local_dir_use_symlinks=False
             )
             fred_df = pd.read_parquet(fred_path)
             print(f"✓ Loaded FRED data: {fred_df.shape}")
