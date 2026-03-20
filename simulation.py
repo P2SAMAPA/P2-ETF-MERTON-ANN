@@ -226,19 +226,30 @@ def generate_merton_training_data(
     T_days: int,
     n_paths: int = 10000,
     W0: float = 1.0,
-    eta: float = 0.5
+    eta: float = 0.5,
+    n_assets: int = None
 ) -> Dict[str, np.ndarray]:
     """
     Generate training data using Merton-optimal allocations as targets.
     This is the proper way: simulate paths and compute optimal weights analytically
     where possible, or use numerical optimization.
     """
-    n_assets = len(params[0]["mu"])
+    if n_assets is None:
+        n_assets = len(params[0]["mu"])
+
+    if n_assets == 0:
+        raise ValueError("n_assets cannot be 0 - check ETF list and calibration")
+
+    print(f"  Generating training data: {n_paths} paths, {T_days} days, {n_assets} assets")
+
     dt = 1/252
     T_steps = T_days
 
     X_list = []
     y_list = []
+
+    if n_paths == 0 or T_days == 0:
+        raise ValueError(f"Invalid parameters: n_paths={n_paths}, T_days={T_days}")
 
     for _ in range(n_paths):
         initial_regime = np.random.choice([0, 1])
@@ -260,17 +271,24 @@ def generate_merton_training_data(
             # Merton optimal weights (analytical solution)
             # w* = (1/eta) * Sigma^(-1) * (mu - r)
             try:
-                Sigma_inv = np.linalg.inv(Sigma)
-                excess_returns = mu - r
-                optimal_weights = (1/eta) * Sigma_inv @ excess_returns
+                if len(mu) != n_assets:
+                    print(f"    WARNING: mu length {len(mu)} != n_assets {n_assets}")
+                    weights = np.ones(n_assets) / n_assets
+                else:
+                    Sigma_inv = np.linalg.inv(Sigma)
+                    excess_returns = mu - r
+                    optimal_weights = (1/eta) * Sigma_inv @ excess_returns
 
-                # Project to simplex (long-only, sum to 1)
-                # Use softmax projection
-                weights = np.exp(optimal_weights)
-                weights = weights / weights.sum()
+                    # Project to simplex (long-only, sum to 1)
+                    # Use softmax projection
+                    weights = np.exp(optimal_weights)
+                    weights = weights / weights.sum()
 
             except np.linalg.LinAlgError:
                 # Fallback to equal weights
+                weights = np.ones(n_assets) / n_assets
+            except Exception as e:
+                print(f"    Error computing weights: {e}")
                 weights = np.ones(n_assets) / n_assets
 
             # Input features
