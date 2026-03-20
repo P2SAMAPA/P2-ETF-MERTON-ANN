@@ -228,9 +228,14 @@ def process_module(
             print(f"Training {T_days}-day horizon...")
 
             # Generate training data
+            n_assets = len(etfs)
+            print(f"  DEBUG: n_assets={n_assets}, etfs={etfs[:3]}...")
+            print(f"  DEBUG: params[0] mu shape={params[0]['mu'].shape if hasattr(params[0]['mu'], 'shape') else len(params[0]['mu'])}")
+
             training_data = generate_merton_training_data(
-                params, semi_markov_params, T_days, n_paths, W0=1.0, eta=eta
+                params, semi_markov_params, T_days, n_paths, W0=1.0, eta=eta, n_assets=n_assets
             )
+            print(f"  DEBUG: training_data X shape={training_data['X'].shape}, y shape={training_data['y'].shape}")
 
             # Train ANN
             model = train_ann_for_horizon(
