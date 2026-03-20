@@ -32,7 +32,7 @@ EQUITY_ETFS = [
     "EEM",   # Emerging Markets
     "EFA",   # Developed International
 ]
-EQUITY_START = "2006-01-01"   # IWF/IWD available from ~2000, GDX from 2004
+EQUITY_START = "2007-01-01"
 
 # ── Fixed income + real assets universe (Option B) ────────────────────────────
 # Benchmark: AGG (not holdable — benchmark only)
@@ -54,7 +54,7 @@ FI_ETFS = [
     "DBC",   # Commodities Broad
     "EMB",   # Emerging Market Bonds
 ]
-FI_START = "2008-01-01"   # EMB/MBB available from 2007-2008
+FI_START = "2007-01-01"
 
 # ── FRED macro series (fetched for both modules) ──────────────────────────────
 FRED_SERIES = {
