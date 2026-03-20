@@ -313,8 +313,7 @@ def main():
     save_signal_to_hf(fi_signal, "fi")
 
     # Summary
-    print("
-" + "=" * 60)
+    print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
     print(f"Equity:      Hold {equity_signal.get('selected_etf', 'N/A')} "
