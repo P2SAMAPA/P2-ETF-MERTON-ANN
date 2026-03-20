@@ -1,0 +1,335 @@
+"""
+train_predict.py — P2-ETF-MERTON-ANN
+Daily pipeline: calibrate → simulate → train 3 ANNs (21/63/126d) → predict winner.
+Outputs single ETF selection with NYSE calendar next trading date.
+"""
+
+import os
+import json
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import local modules
+from config import (
+    HF_DATASET_REPO, HF_TOKEN, FRED_API_KEY,
+    EQUITY_ETFS, EQUITY_REGIME, EQUITY_BENCHMARK,
+    FI_ETFS, FI_REGIME, FI_BENCHMARK,
+    FRED_SERIES
+)
+from regime_detection import full_regime_analysis, get_current_regime
+from calibration import calibrate_both_windows, get_risk_free_rate_from_fred
+from simulation import generate_merton_training_data
+from ann_model import train_ann_for_horizon, predict_optimal_etf, MertonANN
+
+# HuggingFace
+from huggingface_hub import HfApi, hf_hub_download
+import datasets
+
+# NYSE Calendar
+try:
+    from pandas_market_calendars import get_calendar
+    NYSE = get_calendar("NYSE")
+except ImportError:
+    NYSE = None
+
+
+def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load price and FRED data from HuggingFace dataset.
+
+    Returns: (prices_df, fred_df)
+    """
+    try:
+        # Download parquet files
+        prices_path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename=f"data/{module}.parquet",
+            token=HF_TOKEN
+        )
+
+        prices = pd.read_parquet(prices_path)
+
+        # Try to load FRED data
+        try:
+            fred_path = hf_hub_download(
+                repo_id=HF_DATASET_REPO,
+                filename="data/fred_macro.parquet",
+                token=HF_TOKEN
+            )
+            fred_df = pd.read_parquet(fred_path)
+        except:
+            fred_df = pd.DataFrame()
+
+        return prices, fred_df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        # Return empty DataFrames as fallback
+        return pd.DataFrame(), pd.DataFrame()
+
+
+def get_next_trading_date(current_date: pd.Timestamp = None) -> pd.Timestamp:
+    """
+    Get next NYSE trading date using market calendar.
+    """
+    if current_date is None:
+        current_date = pd.Timestamp.now()
+
+    if NYSE is None:
+        # Fallback: simple business day
+        next_date = current_date + pd.Timedelta(days=1)
+        while next_date.weekday() >= 5:  # Saturday=5, Sunday=6
+            next_date += pd.Timedelta(days=1)
+        return next_date
+
+    # Get valid trading days
+    schedule = NYSE.schedule(start_date=current_date, end_date=current_date + pd.Timedelta(days=10))
+    future_dates = schedule[schedule.index > current_date]
+
+    if len(future_dates) > 0:
+        return future_dates.index[0]
+    else:
+        # Fallback
+        return current_date + pd.Timedelta(days=1)
+
+
+def process_module(
+    module: str,
+    etfs: List[str],
+    regime_ticker: str,
+    benchmark: str,
+    horizons: List[int] = [21, 63, 126],
+    eta: float = 0.5,
+    n_paths: int = 10000
+) -> Dict:
+    """
+    Process one module (equity or fixed_income).
+
+    Returns signal dict with selected ETF and metadata.
+    """
+    print(f"
+=== Processing {module} ===")
+
+    # Load data
+    prices, fred_df = load_data_from_hf(module)
+
+    if prices.empty:
+        return {"error": f"No data for {module}"}
+
+    # Extract regime indicator
+    if regime_ticker in prices.columns.get_level_values(0):
+        regime_prices = prices[regime_ticker]['Close']
+    else:
+        # Try flat column structure
+        regime_prices = prices[regime_ticker] if regime_ticker in prices.columns else None
+
+    if regime_prices is None:
+        return {"error": f"Regime indicator {regime_ticker} not found"}
+
+    # Regime detection
+    regime_analysis = full_regime_analysis(regime_prices)
+    current_regime = regime_analysis["current_regime"]
+    semi_markov_params = regime_analysis["semi_markov_params"]
+
+    print(f"Current regime: {regime_analysis['current_regime_label']}")
+    print(f"Threshold: {regime_analysis['threshold']:.2f}")
+
+    # Risk-free rate
+    rf_series = get_risk_free_rate_from_fred(fred_df)
+
+    # Calibration (both windows)
+    current_date = prices.index[-1]
+    calibration_results = calibrate_both_windows(
+        prices, etfs, regime_analysis["regime_history"], rf_series, current_date
+    )
+
+    best_result = None
+    best_annualized_return = -np.inf
+    best_horizon = None
+    best_window = None
+
+    # Train ANNs for each horizon and window
+    for window_type, params in calibration_results.items():
+        print(f"
+--- {window_type} window ---")
+
+        for T_days in horizons:
+            print(f"Training {T_days}-day horizon...")
+
+            # Generate training data
+            training_data = generate_merton_training_data(
+                params, semi_markov_params, T_days, n_paths, W0=1.0, eta=eta
+            )
+
+            # Train ANN
+            model = train_ann_for_horizon(
+                training_data, len(etfs), eta, epochs=500, learning_rate=0.01
+            )
+
+            # Predict for current state (t=0, W=W0, current_regime)
+            selected_idx, weights = predict_optimal_etf(model, 0.0, 0.0, current_regime)
+
+            # Estimate expected return (simplified backtest on synthetic data)
+            # Use last 100 training samples for validation
+            X_val = training_data["X"][-1000:]
+            y_val = training_data["y"][-1000:]
+
+            # Portfolio returns under current regime
+            mu = params[current_regime]["mu"]
+
+            # Average expected return of ANN portfolio
+            ann_weights = model.predict(X_val)
+            expected_returns = ann_weights @ mu  # Annualized
+            avg_annualized_return = np.mean(expected_returns)
+
+            print(f"  Expected annualized return: {avg_annualized_return:.2%}")
+
+            # Track best
+            if avg_annualized_return > best_annualized_return:
+                best_annualized_return = avg_annualized_return
+                best_horizon = T_days
+                best_window = window_type
+                best_result = {
+                    "selected_etf": etfs[selected_idx],
+                    "selected_idx": int(selected_idx),
+                    "weights": {etfs[i]: float(weights[i]) for i in range(len(etfs))},
+                    "regime": "risk-on" if current_regime == 0 else "risk-off",
+                    "horizon_days": T_days,
+                    "window_type": window_type,
+                    "expected_return_annualized": float(avg_annualized_return),
+                    "model_params": model.get_weights(),
+                    "n_parameters": model.count_parameters(),
+                }
+
+    # Add metadata
+    next_trading_date = get_next_trading_date(current_date)
+
+    signal = {
+        "date": current_date.strftime("%Y-%m-%d"),
+        "next_trading_date": next_trading_date.strftime("%Y-%m-%d"),
+        "module": module,
+        **best_result,
+        "all_horizons_tested": horizons,
+        "semi_markov_params": semi_markov_params,
+        "regime_threshold": float(regime_analysis["threshold"]),
+    }
+
+    print(f"
+✓ Best: {signal['selected_etf']} ({signal['horizon_days']}d, {signal['window_type']})")
+    print(f"  Expected return: {signal['expected_return_annualized']:.2%}")
+
+    return signal
+
+
+def save_signal_to_hf(signal: Dict, module: str):
+    """Save signal JSON to HuggingFace dataset."""
+    try:
+        api = HfApi(token=HF_TOKEN)
+
+        # Create temp file
+        temp_file = f"/tmp/{module}_signal.json"
+        with open(temp_file, 'w') as f:
+            json.dump(signal, f, indent=2, default=str)
+
+        # Upload
+        api.upload_file(
+            path_or_fileobj=temp_file,
+            path_in_repo=f"signals/{module}_signal.json",
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset"
+        )
+
+        # Also append to history
+        try:
+            history_file = f"/tmp/{module}_history.json"
+            try:
+                existing = hf_hub_download(
+                    repo_id=HF_DATASET_REPO,
+                    filename=f"signals/{module}_history.json",
+                    token=HF_TOKEN
+                )
+                with open(existing, 'r') as f:
+                    history = json.load(f)
+            except:
+                history = []
+
+            history.append(signal)
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2, default=str)
+
+            api.upload_file(
+                path_or_fileobj=history_file,
+                path_in_repo=f"signals/{module}_history.json",
+                repo_id=HF_DATASET_REPO,
+                repo_type="dataset"
+            )
+        except Exception as e:
+            print(f"History update warning: {e}")
+
+        print(f"✓ Saved signal to HF: signals/{module}_signal.json")
+    except Exception as e:
+        print(f"Error saving to HF: {e}")
+
+
+def main():
+    """Main daily pipeline."""
+    print("=" * 60)
+    print("P2-ETF-MERTON-ANN: Daily Training & Prediction")
+    print(f"Started: {datetime.now().isoformat()}")
+    print("=" * 60)
+
+    # Parameters
+    ETA = 0.5  # Risk aversion
+    HORIZONS = [21, 63, 126]  # Days
+    N_PATHS = 10000  # Synthetic paths
+
+    results = {}
+
+    # Process Equity Module
+    equity_signal = process_module(
+        "equity",
+        EQUITY_ETFS,
+        EQUITY_REGIME,
+        EQUITY_BENCHMARK,
+        HORIZONS,
+        ETA,
+        N_PATHS
+    )
+    results["equity"] = equity_signal
+    save_signal_to_hf(equity_signal, "equity")
+
+    # Process Fixed Income Module
+    fi_signal = process_module(
+        "fixed_income",
+        FI_ETFS,
+        FI_REGIME,
+        FI_BENCHMARK,
+        HORIZONS,
+        ETA,
+        N_PATHS
+    )
+    results["fixed_income"] = fi_signal
+    save_signal_to_hf(fi_signal, "fi")
+
+    # Summary
+    print("
+" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"Equity:      Hold {equity_signal.get('selected_etf', 'N/A')} "
+          f"for {equity_signal.get('next_trading_date', 'N/A')} "
+          f"({equity_signal.get('expected_return_annualized', 0):.1%} exp)")
+    print(f"Fixed Inc:   Hold {fi_signal.get('selected_etf', 'N/A')} "
+          f"for {fi_signal.get('next_trading_date', 'N/A')} "
+          f"({fi_signal.get('expected_return_annualized', 0):.1%} exp)")
+    print("=" * 60)
+
+    return results
+
+
+if __name__ == "__main__":
+    main()
