@@ -29,7 +29,9 @@ def detect_regime_threshold(regime_indicator: pd.Series, window: int = 252) -> f
     gma_clean = gma.dropna()
 
     if len(gma_clean) < 10:
-        raise ValueError(f"Insufficient data for regime detection: {len(gma_clean)} points")
+        print(f"⚠ Insufficient data for regime detection: {len(gma_clean)} points, using median as threshold")
+        # Fallback: use median of available data
+        return float(gma_clean.median()) if len(gma_clean) > 0 else 20.0
 
     log_gma = np.log(gma_clean).values.reshape(-1, 1)
 
