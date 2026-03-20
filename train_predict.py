@@ -152,8 +152,7 @@ def process_module(
 
     # Train ANNs for each horizon and window
     for window_type, params in calibration_results.items():
-        print(f"
---- {window_type} window ---")
+        print(f"\n--- {window_type} window ---")
 
         for T_days in horizons:
             print(f"Training {T_days}-day horizon...")
@@ -216,8 +215,7 @@ def process_module(
         "regime_threshold": float(regime_analysis["threshold"]),
     }
 
-    print(f"
-✓ Best: {signal['selected_etf']} ({signal['horizon_days']}d, {signal['window_type']})")
+    print(f"\n✓ Best: {signal['selected_etf']} ({signal['horizon_days']}d, {signal['window_type']})")
     print(f"  Expected return: {signal['expected_return_annualized']:.2%}")
 
     return signal
