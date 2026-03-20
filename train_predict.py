@@ -13,6 +13,39 @@ from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
+# Debug: Check environment variables at startup
+print("Environment Check:")
+print(f"  HF_DATASET_REPO env: {os.environ.get('HF_DATASET_REPO', 'NOT SET')}")
+print(f"  HF_TOKEN env: {'SET (' + str(len(os.environ.get('HF_TOKEN', ''))) + ' chars)' if os.environ.get('HF_TOKEN') else 'NOT SET'}")
+print(f"  FRED_API_KEY env: {'SET' if os.environ.get('FRED_API_KEY') else 'NOT SET'}")
+
+# Verify HF repo connection
+try:
+    from huggingface_hub import HfApi
+    api = HfApi(token=HF_TOKEN)
+
+    # Try to get repo info
+    print(f"\nVerifying HF repo: {HF_DATASET_REPO}")
+    repo_info = api.repo_info(repo_id=HF_DATASET_REPO, repo_type="dataset")
+    print(f"✓ Repo found: {repo_info.id}")
+    print(f"  Private: {repo_info.private}")
+    print(f"  Last modified: {repo_info.last_modified}")
+
+    # List files in data folder
+    print(f"\nListing files in repo:")
+    files = api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
+    data_files = [f for f in files if f.startswith("data/")]
+    print(f"  Data files: {data_files}")
+
+except Exception as e:
+    print(f"✗ ERROR verifying repo: {e}")
+    print(f"  This usually means:")
+    print(f"  1. HF_DATASET_REPO secret is wrong (check for typos/extra spaces)")
+    print(f"  2. HF_TOKEN doesn't have read access")
+    print(f"  3. Repo doesn't exist or is private")
+    print(f"\nExpected format: P2SAMAPA/p2-etf-merton-ann-data")
+    print(f"Current value length: {len(HF_DATASET_REPO) if HF_DATASET_REPO else 0} chars")
+
 # Import local modules
 from config import (
     HF_DATASET_REPO, HF_TOKEN, FRED_API_KEY,
@@ -42,6 +75,10 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     Returns: (prices_df, fred_df)
     """
+    print(f"\nLoading data for module: {module}")
+    print(f"Using repo: {HF_DATASET_REPO}")
+    print(f"Token length: {len(HF_TOKEN) if HF_TOKEN else 0}")
+
     try:
         # Download parquet files
         prices_path = hf_hub_download(
@@ -222,34 +259,79 @@ def process_module(
 
 def save_signal_to_hf(signal: Dict, module: str):
     """Save signal JSON to HuggingFace dataset."""
+    import traceback
+
+    print(f"\n{'='*60}")
+    print(f"SAVE SIGNAL: {module}")
+    print(f"{'='*60}")
+    print(f"Repo: {HF_DATASET_REPO}")
+    print(f"Token available: {'Yes (len=%d)' % len(HF_TOKEN) if HF_TOKEN else 'No'}")
+
+    # Check signal validity
+    if not signal or 'error' in signal:
+        print(f"⚠ WARNING: Signal for {module} is empty or contains error")
+        print(f"Signal content: {signal}")
+        return
+
     try:
         api = HfApi(token=HF_TOKEN)
 
         # Create temp file
         temp_file = f"/tmp/{module}_signal.json"
+        os.makedirs("/tmp", exist_ok=True)
+
         with open(temp_file, 'w') as f:
             json.dump(signal, f, indent=2, default=str)
 
-        # Upload
-        api.upload_file(
-            path_or_fileobj=temp_file,
-            path_in_repo=f"signals/{module}_signal.json",
-            repo_id=HF_DATASET_REPO,
-            repo_type="dataset"
-        )
+        print(f"✓ Created temp file: {temp_file}")
+        print(f"  File size: {os.path.getsize(temp_file)} bytes")
+        print(f"  Selected ETF: {signal.get('selected_etf', 'N/A')}")
+
+        # Ensure signals folder exists by uploading with create_pr set to False
+        path_in_repo = f"signals/{module}_signal.json"
+        print(f"Uploading to: {path_in_repo}")
+
+        # Upload file - use create_pr=False to commit directly to main
+        try:
+            result = api.upload_file(
+                path_or_fileobj=temp_file,
+                path_in_repo=path_in_repo,
+                repo_id=HF_DATASET_REPO,
+                repo_type="dataset",
+                commit_message=f"Update {module} signal for {signal.get('date', 'unknown')}",
+            )
+            print(f"✓ Successfully uploaded: {path_in_repo}")
+        except Exception as upload_error:
+            print(f"⚠ First upload attempt failed: {upload_error}")
+            print("Trying alternative upload method...")
+
+            # Alternative: try with explicit branch
+            result = api.upload_file(
+                path_or_fileobj=temp_file,
+                path_in_repo=path_in_repo,
+                repo_id=HF_DATASET_REPO,
+                repo_type="dataset",
+                commit_message=f"Update {module} signal",
+                create_pr=False,
+            )
+            print(f"✓ Alternative upload succeeded: {path_in_repo}")
 
         # Also append to history
         try:
             history_file = f"/tmp/{module}_history.json"
+            history = []
+
             try:
-                existing = hf_hub_download(
+                existing_path = hf_hub_download(
                     repo_id=HF_DATASET_REPO,
                     filename=f"signals/{module}_history.json",
                     token=HF_TOKEN
                 )
-                with open(existing, 'r') as f:
+                with open(existing_path, 'r') as f:
                     history = json.load(f)
-            except:
+                print(f"✓ Loaded existing history: {len(history)} records")
+            except Exception as e:
+                print(f"ℹ No existing history (OK for first run)")
                 history = []
 
             history.append(signal)
@@ -261,14 +343,21 @@ def save_signal_to_hf(signal: Dict, module: str):
                 path_or_fileobj=history_file,
                 path_in_repo=f"signals/{module}_history.json",
                 repo_id=HF_DATASET_REPO,
-                repo_type="dataset"
+                repo_type="dataset",
+                commit_message=f"Update {module} history"
             )
-        except Exception as e:
-            print(f"History update warning: {e}")
+            print(f"✓ Updated history: {len(history)} total records")
 
-        print(f"✓ Saved signal to HF: signals/{module}_signal.json")
+        except Exception as e:
+            print(f"⚠ History update failed (non-critical): {e}")
+
+        print(f"{'='*60}\n")
+
     except Exception as e:
-        print(f"Error saving to HF: {e}")
+        print(f"✗ ERROR saving to HF: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        print(f"{'='*60}\n")
+        raise
 
 
 def main():
@@ -286,30 +375,48 @@ def main():
     results = {}
 
     # Process Equity Module
-    equity_signal = process_module(
-        "equity",
-        EQUITY_ETFS,
-        EQUITY_REGIME,
-        EQUITY_BENCHMARK,
-        HORIZONS,
-        ETA,
-        N_PATHS
-    )
-    results["equity"] = equity_signal
-    save_signal_to_hf(equity_signal, "equity")
+    print("\n>>> Starting Equity Module Processing <<<")
+    try:
+        equity_signal = process_module(
+            "equity",
+            EQUITY_ETFS,
+            EQUITY_REGIME,
+            EQUITY_BENCHMARK,
+            HORIZONS,
+            ETA,
+            N_PATHS
+        )
+        print(f"Equity processing complete. Signal: {equity_signal.get('selected_etf', 'ERROR')}")
+        results["equity"] = equity_signal
+        save_signal_to_hf(equity_signal, "equity")
+    except Exception as e:
+        print(f"✗ ERROR in equity processing: {e}")
+        import traceback
+        print(traceback.format_exc())
+        equity_signal = {"error": str(e), "module": "equity"}
+        results["equity"] = equity_signal
 
     # Process Fixed Income Module
-    fi_signal = process_module(
-        "fixed_income",
-        FI_ETFS,
-        FI_REGIME,
-        FI_BENCHMARK,
-        HORIZONS,
-        ETA,
-        N_PATHS
-    )
-    results["fixed_income"] = fi_signal
-    save_signal_to_hf(fi_signal, "fi")
+    print("\n>>> Starting Fixed Income Module Processing <<<")
+    try:
+        fi_signal = process_module(
+            "fixed_income",
+            FI_ETFS,
+            FI_REGIME,
+            FI_BENCHMARK,
+            HORIZONS,
+            ETA,
+            N_PATHS
+        )
+        print(f"Fixed Income processing complete. Signal: {fi_signal.get('selected_etf', 'ERROR')}")
+        results["fixed_income"] = fi_signal
+        save_signal_to_hf(fi_signal, "fi")
+    except Exception as e:
+        print(f"✗ ERROR in fixed income processing: {e}")
+        import traceback
+        print(traceback.format_exc())
+        fi_signal = {"error": str(e), "module": "fixed_income"}
+        results["fixed_income"] = fi_signal
 
     # Summary
     print("\n" + "=" * 60)
@@ -327,4 +434,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print(f"FATAL ERROR: {e}")
+        print(traceback.format_exc())
+        raise
