@@ -167,11 +167,33 @@ def process_module(
         return {"error": f"No data for {module}"}
 
     # Extract regime indicator
-    if regime_ticker in prices.columns.get_level_values(0):
-        regime_prices = prices[regime_ticker]['Close']
+    print(f"Available columns: {list(prices.columns)[:10]}...")  # Show first 10
+    print(f"Looking for regime ticker: {regime_ticker}")
+
+    regime_prices = None
+
+    # Try different column structures
+    if isinstance(prices.columns, pd.MultiIndex):
+        # MultiIndex structure (Ticker, Field)
+        if regime_ticker in prices.columns.get_level_values(0):
+            regime_prices = prices[regime_ticker]['Close'] if 'Close' in prices[regime_ticker].columns else prices[regime_ticker].iloc[:, 0]
     else:
-        # Try flat column structure
-        regime_prices = prices[regime_ticker] if regime_ticker in prices.columns else None
+        # Flat column structure - try various naming conventions
+        possible_names = [
+            regime_ticker,
+            regime_ticker.replace('^', ''),
+            f"{regime_ticker}_Close",
+            regime_ticker.lstrip('^')
+        ]
+
+        for name in possible_names:
+            if name in prices.columns:
+                regime_prices = prices[name]
+                print(f"✓ Found regime indicator as: {name}")
+                break
+
+    if regime_prices is None:
+        print(f"✗ Regime indicator {regime_ticker} not found. Tried: {possible_names}")
 
     if regime_prices is None:
         return {"error": f"Regime indicator {regime_ticker} not found"}
