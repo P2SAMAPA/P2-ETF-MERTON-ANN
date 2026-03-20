@@ -110,8 +110,7 @@ def process_module(
 
     Returns signal dict with selected ETF and metadata.
     """
-    print(f"
-=== Processing {module} ===")
+    print(f"\n=== Processing {module} ===")
 
     # Load data
     prices, fred_df = load_data_from_hf(module)
