@@ -15,36 +15,11 @@ warnings.filterwarnings('ignore')
 
 # Debug: Check environment variables at startup
 print("Environment Check:")
-print(f"  HF_DATASET_REPO env: {os.environ.get('HF_DATASET_REPO', 'NOT SET')}")
-print(f"  HF_TOKEN env: {'SET (' + str(len(os.environ.get('HF_TOKEN', ''))) + ' chars)' if os.environ.get('HF_TOKEN') else 'NOT SET'}")
+hf_repo_env = os.environ.get('HF_DATASET_REPO', 'NOT SET')
+hf_token_env = os.environ.get('HF_TOKEN', '')
+print(f"  HF_DATASET_REPO env: {hf_repo_env}")
+print(f"  HF_TOKEN env: {'SET (' + str(len(hf_token_env)) + ' chars)' if hf_token_env else 'NOT SET'}")
 print(f"  FRED_API_KEY env: {'SET' if os.environ.get('FRED_API_KEY') else 'NOT SET'}")
-
-# Verify HF repo connection
-try:
-    from huggingface_hub import HfApi
-    api = HfApi(token=HF_TOKEN)
-
-    # Try to get repo info
-    print(f"\nVerifying HF repo: {HF_DATASET_REPO}")
-    repo_info = api.repo_info(repo_id=HF_DATASET_REPO, repo_type="dataset")
-    print(f"✓ Repo found: {repo_info.id}")
-    print(f"  Private: {repo_info.private}")
-    print(f"  Last modified: {repo_info.last_modified}")
-
-    # List files in data folder
-    print(f"\nListing files in repo:")
-    files = api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
-    data_files = [f for f in files if f.startswith("data/")]
-    print(f"  Data files: {data_files}")
-
-except Exception as e:
-    print(f"✗ ERROR verifying repo: {e}")
-    print(f"  This usually means:")
-    print(f"  1. HF_DATASET_REPO secret is wrong (check for typos/extra spaces)")
-    print(f"  2. HF_TOKEN doesn't have read access")
-    print(f"  3. Repo doesn't exist or is private")
-    print(f"\nExpected format: P2SAMAPA/p2-etf-merton-ann-data")
-    print(f"Current value length: {len(HF_DATASET_REPO) if HF_DATASET_REPO else 0} chars")
 
 # Import local modules
 from config import (
@@ -60,6 +35,31 @@ from ann_model import train_ann_for_horizon, predict_optimal_etf, MertonANN
 
 # HuggingFace
 from huggingface_hub import HfApi, hf_hub_download
+
+# Verify HF repo connection (after imports)
+try:
+    api = HfApi(token=HF_TOKEN)
+
+    # Try to get repo info
+    print(f"\nVerifying HF repo: {HF_DATASET_REPO}")
+    repo_info = api.repo_info(repo_id=HF_DATASET_REPO, repo_type="dataset")
+    print(f"✓ Repo found: {repo_info.id}")
+    print(f"  Private: {repo_info.private}")
+
+    # List files in data folder
+    print(f"  Listing files in repo:")
+    files = api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
+    data_files = [f for f in files if f.startswith("data/")]
+    print(f"    Data files: {data_files}")
+
+except Exception as e:
+    print(f"✗ ERROR verifying repo: {e}")
+    print(f"  This usually means:")
+    print(f"  1. HF_DATASET_REPO secret is wrong (check for typos/extra spaces)")
+    print(f"  2. HF_TOKEN doesn't have read access")
+    print(f"  3. Repo doesn't exist or is private")
+    print(f"\nExpected format: P2SAMAPA/p2-etf-merton-ann-data")
+    print(f"Current value: {HF_DATASET_REPO}")
 
 # NYSE Calendar
 try:
