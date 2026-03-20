@@ -15,13 +15,38 @@ def compute_returns(prices: pd.DataFrame, tickers: list) -> pd.DataFrame:
     prices: DataFrame with MultiIndex (Date, Ticker) or columns per ticker
     """
     if isinstance(prices.columns, pd.MultiIndex):
-        # Extract close prices
+        # Extract close prices from MultiIndex
         close_prices = prices.xs('Close', level=1, axis=1) if 'Close' in prices.columns.get_level_values(1) else prices
     else:
-        close_prices = prices
+        # Flat column structure - look for _Close suffix
+        close_dict = {}
+        for ticker in tickers:
+            # Try different column naming conventions
+            possible_names = [
+                f"{ticker}_Close",
+                f"{ticker}_close",
+                ticker,
+            ]
+            for name in possible_names:
+                if name in prices.columns:
+                    close_dict[ticker] = prices[name]
+                    break
 
-    # Ensure we only have requested tickers
+        if not close_dict:
+            # Try to find any column that starts with ticker and contains Close
+            for col in prices.columns:
+                for ticker in tickers:
+                    if col.startswith(ticker) and 'Close' in col:
+                        close_dict[ticker] = prices[col]
+                        break
+
+        close_prices = pd.DataFrame(close_dict)
+
+    # Ensure we only have requested tickers that were found
     available_tickers = [t for t in tickers if t in close_prices.columns]
+    if len(available_tickers) == 0:
+        raise ValueError(f"No tickers found in data. Looking for: {tickers[:5]}... Available: {list(prices.columns)[:10]}...")
+
     close_prices = close_prices[available_tickers]
 
     # Log returns
