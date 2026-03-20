@@ -1,0 +1,7 @@
+# P2-ETF-MERTON-ANN — data pipeline dependencies
+yfinance>=0.2.40
+pandas>=2.2.0
+numpy>=1.26.4,<2.0
+pyarrow>=16.1.0
+huggingface-hub>=0.23.4
+requests>=2.31.0
