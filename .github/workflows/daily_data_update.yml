@@ -1,0 +1,40 @@
+name: Daily Data Update
+
+on:
+  schedule:
+    # Runs Mon-Fri at 21:30 UTC (after 4:00 PM ET US market close + buffer)
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:   # allow manual trigger anytime
+
+jobs:
+  daily-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Append new trading day to HuggingFace dataset
+        env:
+          HF_TOKEN:        ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY:    ${{ secrets.FRED_API_KEY }}
+          HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+        run: python daily_data_update.py
