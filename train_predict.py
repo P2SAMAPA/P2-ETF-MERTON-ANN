@@ -161,9 +161,9 @@ def process_module(
     best_window = None
 
     for window_type, params in calibration_results.items():
-        # Validate parameters before proceeding
+        # Skip if parameters are obviously invalid (all zeros or NaNs)
         if not validate_parameters(params):
-            print(f"⚠ Skipping {window_type} due to invalid parameters (non-positive definite covariance or NaN)")
+            print(f"⚠ Parameters for {window_type} appear invalid (NaNs/zeros). Skipping.")
             continue
 
         print(f"\n--- {window_type} window ---")
@@ -173,7 +173,6 @@ def process_module(
 
             n_assets = len(etfs)
             print(f"  DEBUG: n_assets={n_assets}")
-            print(f"  DEBUG: params[0] mu shape={params[0]['mu'].shape if hasattr(params[0]['mu'], 'shape') else len(params[0]['mu'])}")
 
             # Generate training data with safety
             try:
@@ -206,8 +205,6 @@ def process_module(
 
             # Estimate expected return
             X_val = training_data["X"][-1000:]
-            y_val = training_data["y"][-1000:]
-
             ann_weights = model.predict(X_val)
             ann_weights = np.nan_to_num(ann_weights, nan=1.0/len(etfs))
 
