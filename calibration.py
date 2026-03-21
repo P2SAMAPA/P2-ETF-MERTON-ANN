@@ -52,10 +52,15 @@ def estimate_parameters(
         start_date = current_date - pd.DateOffset(years=10)
         data = data[data.index >= start_date]
 
+    # DEBUG: Print mean daily returns from raw data (first 5 columns)
+    print(f"  DEBUG (calibration): Mean daily log returns (first 5 columns) for {window_type} window:")
+    print(f"    {returns.iloc[:, :5].mean().values}")
+
     params = {}
     for regime in [0, 1]:
         regime_data = data[data['regime'] == regime]
         if len(regime_data) < 30:
+            print(f"  WARNING: Regime {regime} has only {len(regime_data)} observations; using all data.")
             regime_data = data  # fallback to all data
 
         if len(regime_data) == 0:
@@ -72,7 +77,7 @@ def estimate_parameters(
 
         regime_returns = regime_data.drop(columns=['regime', 'rf'], errors='ignore')
 
-        # Drop tickers with zero variance (constant returns) – they break Cholesky
+        # Drop tickers with zero variance (constant returns)
         variances = regime_returns.var()
         valid_columns = variances[variances > 1e-12].index.tolist()
         if len(valid_columns) < 2:
@@ -83,6 +88,21 @@ def estimate_parameters(
         mu_daily = regime_returns.mean().values
         mu = mu_daily * 252
 
+        # If mu is all zero, fall back to global mean (across all regimes)
+        if np.allclose(mu, 0.0):
+            print(f"  WARNING: Regime {regime} mu is zero. Falling back to global mean.")
+            global_mu_daily = returns.mean().values
+            global_mu = global_mu_daily * 252
+            # Align dimensions
+            if len(global_mu) > len(mu):
+                mu = global_mu[:len(mu)]
+            elif len(global_mu) < len(mu):
+                mu_padded = np.zeros(len(mu))
+                mu_padded[:len(global_mu)] = global_mu
+                mu = mu_padded
+            else:
+                mu = global_mu
+
         Sigma_daily = regime_returns.cov().values
         Sigma = Sigma_daily * 252
 
@@ -90,13 +110,12 @@ def estimate_parameters(
         try:
             np.linalg.cholesky(Sigma)
         except np.linalg.LinAlgError:
-            # Add small ridge
             Sigma = Sigma + np.eye(len(mu)) * 1e-6
 
         # Risk-free rate
         r = regime_data['rf'].mean() * 252 if 'rf' in regime_data.columns else 0.02
 
-        # Replace NaNs/Infs
+        # Replace any remaining NaNs/Infs
         mu = np.nan_to_num(mu, nan=0.0)
         Sigma = np.nan_to_num(Sigma, nan=0.0)
 
@@ -113,7 +132,6 @@ def estimate_parameters(
     for regime in [0, 1]:
         current_n = len(params[regime]["mu"])
         if current_n < n_assets:
-            # Pad mu and Sigma with zeros/identity for missing assets
             mu_padded = np.zeros(n_assets)
             mu_padded[:current_n] = params[regime]["mu"]
             Sigma_padded = np.eye(n_assets) * 1e-4
@@ -161,7 +179,6 @@ def validate_parameters(params: Dict[int, Dict]) -> bool:
         mu = params[regime]["mu"]
         if np.any(~np.isfinite(Sigma)) or np.any(~np.isfinite(mu)):
             return False
-        # Only check if it's not all zeros; if it is, we can still simulate
         if np.all(Sigma == 0):
             return False
     return True
