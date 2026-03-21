@@ -61,15 +61,29 @@ st.markdown("""
 def load_signal(module: str) -> dict:
     """Load current signal from HF."""
     try:
+        filename = f"signals/{module}_signal.json"
+        print(f"Attempting to load: {filename} from {HF_DATASET_REPO}")
+
         path = hf_hub_download(
             repo_id=HF_DATASET_REPO,
-            filename=f"signals/{module}_signal.json",
+            filename=filename,
             token=HF_TOKEN
         )
         with open(path, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+        print(f"✓ Successfully loaded {module} signal")
+        return data
     except Exception as e:
-        st.error(f"Error loading {module} signal: {e}")
+        error_msg = str(e)
+        if "404" in error_msg:
+            st.error(f"📁 Signal file not found: `signals/{module}_signal.json`\n\n"
+                    f"The training pipeline may not have completed yet, or the file wasn't uploaded.\n\n"
+                    f"**Debug info:**\n"
+                    f"- Repo: `{HF_DATASET_REPO}`\n"
+                    f"- Token configured: `{'Yes' if HF_TOKEN else 'No'}`\n"
+                    f"- Error: {error_msg[:100]}...")
+        else:
+            st.error(f"Error loading {module} signal: {e}")
         return {}
 
 
