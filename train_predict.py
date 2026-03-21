@@ -21,7 +21,6 @@ print(f"  HF_DATASET_REPO env: {hf_repo_env}")
 print(f"  HF_TOKEN env: {'SET (' + str(len(hf_token_env)) + ' chars)' if hf_token_env else 'NOT SET'}")
 print(f"  FRED_API_KEY env: {'SET' if os.environ.get('FRED_API_KEY') else 'NOT SET'}")
 
-# Import local modules
 from config import (
     HF_DATASET_REPO, HF_TOKEN, FRED_API_KEY,
     EQUITY_ETFS, EQUITY_REGIME, EQUITY_BENCHMARK,
@@ -29,14 +28,12 @@ from config import (
     FRED_SERIES
 )
 from regime_detection import full_regime_analysis, get_current_regime
-from calibration import calibrate_both_windows, get_risk_free_rate_from_fred
+from calibration import calibrate_both_windows, get_risk_free_rate_from_fred, validate_parameters
 from simulation import generate_merton_training_data
 from ann_model import train_ann_for_horizon, predict_optimal_etf, MertonANN
 
-# HuggingFace
 from huggingface_hub import HfApi, hf_hub_download
 
-# NYSE Calendar
 try:
     from pandas_market_calendars import get_calendar
     NYSE = get_calendar("NYSE")
@@ -45,17 +42,12 @@ except ImportError:
 
 
 def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Load price and FRED data from HuggingFace dataset.
-
-    Returns: (prices_df, fred_df)
-    """
+    """Load price and FRED data from HuggingFace dataset."""
     print(f"\nLoading data for module: {module}")
     print(f"Using repo: {HF_DATASET_REPO}")
     print(f"Token length: {len(HF_TOKEN) if HF_TOKEN else 0}")
 
     try:
-        # Download prices file using hf_hub_download function
         print(f"Downloading data/{module}.parquet...")
         prices_path = hf_hub_download(
             repo_id=HF_DATASET_REPO,
@@ -68,7 +60,6 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         prices = pd.read_parquet(prices_path)
         print(f"✓ Loaded prices: {prices.shape}")
 
-        # Try to load FRED data
         try:
             print("Downloading data/fred_macro.parquet...")
             fred_path = hf_hub_download(
@@ -90,32 +81,25 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         print(f"✗ Error loading data: {e}")
         import traceback
         print(traceback.format_exc())
-        # Return empty DataFrames as fallback
         return pd.DataFrame(), pd.DataFrame()
 
 
 def get_next_trading_date(current_date: pd.Timestamp = None) -> pd.Timestamp:
-    """
-    Get next NYSE trading date using market calendar.
-    """
+    """Get next NYSE trading date using market calendar."""
     if current_date is None:
         current_date = pd.Timestamp.now()
 
     if NYSE is None:
-        # Fallback: simple business day
         next_date = current_date + pd.Timedelta(days=1)
-        while next_date.weekday() >= 5:  # Saturday=5, Sunday=6
+        while next_date.weekday() >= 5:
             next_date += pd.Timedelta(days=1)
         return next_date
 
-    # Get valid trading days
     schedule = NYSE.schedule(start_date=current_date, end_date=current_date + pd.Timedelta(days=10))
     future_dates = schedule[schedule.index > current_date]
-
     if len(future_dates) > 0:
         return future_dates.index[0]
     else:
-        # Fallback
         return current_date + pd.Timedelta(days=1)
 
 
@@ -128,16 +112,10 @@ def process_module(
     eta: float = 0.5,
     n_paths: int = 10000
 ) -> Dict:
-    """
-    Process one module (equity or fixed_income).
-
-    Returns signal dict with selected ETF and metadata.
-    """
+    """Process one module (equity or fixed_income)."""
     print(f"\n=== Processing {module} ===")
 
-    # Load data
     prices, fred_df = load_data_from_hf(module)
-
     if prices.empty:
         return {"error": f"No data for {module}"}
 
@@ -146,20 +124,11 @@ def process_module(
     print(f"Looking for regime ticker: {regime_ticker}")
 
     regime_prices = None
-
-    # Try different column naming conventions
     if isinstance(prices.columns, pd.MultiIndex):
-        # MultiIndex structure (Ticker, Field)
         if regime_ticker in prices.columns.get_level_values(0):
             regime_prices = prices[regime_ticker]['Close'] if 'Close' in prices[regime_ticker].columns else prices[regime_ticker].iloc[:, 0]
     else:
-        # Flat column structure - look for _Close suffix
-        possible_names = [
-            f"{regime_ticker}_Close",
-            f"{regime_ticker}_close",
-            regime_ticker,
-        ]
-
+        possible_names = [f"{regime_ticker}_Close", f"{regime_ticker}_close", regime_ticker]
         for name in possible_names:
             if name in prices.columns:
                 regime_prices = prices[name]
@@ -191,62 +160,69 @@ def process_module(
     best_horizon = None
     best_window = None
 
-    # Train ANNs for each horizon and window
     for window_type, params in calibration_results.items():
+        # Validate parameters before proceeding
+        if not validate_parameters(params):
+            print(f"⚠ Skipping {window_type} due to invalid parameters (non-positive definite covariance or NaN)")
+            continue
+
         print(f"\n--- {window_type} window ---")
 
         for T_days in horizons:
             print(f"Training {T_days}-day horizon...")
 
-            # Generate training data
             n_assets = len(etfs)
             print(f"  DEBUG: n_assets={n_assets}")
             print(f"  DEBUG: params[0] mu shape={params[0]['mu'].shape if hasattr(params[0]['mu'], 'shape') else len(params[0]['mu'])}")
 
-            training_data = generate_merton_training_data(
-                params, semi_markov_params, T_days, n_paths, W0=1.0, eta=eta, n_assets=n_assets
-            )
+            # Generate training data with safety
+            try:
+                training_data = generate_merton_training_data(
+                    params, semi_markov_params, T_days, n_paths, W0=1.0, eta=eta, n_assets=n_assets
+                )
+            except Exception as e:
+                print(f"  ✗ Error generating training data: {e}")
+                continue
+
             print(f"  DEBUG: training_data X shape={training_data['X'].shape}, y shape={training_data['y'].shape}")
 
             # Train ANN
-            model = train_ann_for_horizon(
-                training_data, len(etfs), eta, epochs=500, learning_rate=0.01
-            )
+            try:
+                model = train_ann_for_horizon(
+                    training_data, len(etfs), eta, epochs=500, learning_rate=0.01
+                )
+            except Exception as e:
+                print(f"  ✗ Error training ANN: {e}")
+                continue
 
             # Predict for current state (t=0, W=W0, current_regime)
             selected_idx, weights = predict_optimal_etf(model, 0.0, 0.0, current_regime)
 
-            # Estimate expected return (simplified backtest on synthetic data)
-            # Use last 100 training samples for validation
+            # Validate that weights are not NaN
+            if np.any(np.isnan(weights)):
+                print(f"  WARNING: NaN in ann_weights, replacing with equal weights")
+                weights = np.ones(len(etfs)) / len(etfs)
+                selected_idx = np.argmax(weights)
+
+            # Estimate expected return
             X_val = training_data["X"][-1000:]
             y_val = training_data["y"][-1000:]
 
-            # Portfolio returns under current regime
-            mu = params[current_regime]["mu"]
-
-            # Average expected return of ANN portfolio
             ann_weights = model.predict(X_val)
+            ann_weights = np.nan_to_num(ann_weights, nan=1.0/len(etfs))
 
-            # Debug NaN issues
-            if np.any(np.isnan(ann_weights)):
-                print(f"  WARNING: NaN in ann_weights, replacing with equal weights")
-                ann_weights = np.nan_to_num(ann_weights, nan=1.0/len(etfs))
+            mu = params[current_regime]["mu"]
+            mu = np.nan_to_num(mu, nan=0.0)
 
-            if np.any(np.isnan(mu)):
-                print(f"  WARNING: NaN in mu, replacing with 0")
-                mu = np.nan_to_num(mu, nan=0.0)
-
-            expected_returns = ann_weights @ mu  # Annualized
+            expected_returns = ann_weights @ mu
             avg_annualized_return = np.mean(expected_returns)
 
             if np.isnan(avg_annualized_return):
-                print(f"  WARNING: avg_annualized_return is NaN, using 0")
                 avg_annualized_return = 0.0
 
             print(f"  Expected annualized return: {avg_annualized_return:.2%}")
 
-            # Track best (ignore NaN)
-            if not np.isnan(avg_annualized_return) and avg_annualized_return > best_annualized_return:
+            if avg_annualized_return > best_annualized_return:
                 best_annualized_return = avg_annualized_return
                 best_horizon = T_days
                 best_window = window_type
@@ -262,12 +238,10 @@ def process_module(
                     "n_parameters": model.count_parameters(),
                 }
 
-    # Handle case where no valid result was found
     if best_result is None:
         print(f"✗ ERROR: No valid training result found for {module}")
         return {"error": f"Training failed - all horizons returned NaN", "module": module}
 
-    # Add metadata
     next_trading_date = get_next_trading_date(current_date)
 
     signal = {
@@ -296,7 +270,6 @@ def save_signal_to_hf(signal: Dict, module: str):
     print(f"Repo: {HF_DATASET_REPO}")
     print(f"Token available: {'Yes (len=%d)' % len(HF_TOKEN) if HF_TOKEN else 'No'}")
 
-    # Check signal validity - don't save error signals
     if not signal or 'error' in signal:
         print(f"✗ ERROR: Signal for {module} failed - not saving to HF")
         print(f"Signal content: {signal}")
@@ -305,7 +278,6 @@ def save_signal_to_hf(signal: Dict, module: str):
     try:
         api = HfApi(token=HF_TOKEN)
 
-        # Create temp file
         temp_file = f"/tmp/{module}_signal.json"
         os.makedirs("/tmp", exist_ok=True)
 
@@ -316,36 +288,19 @@ def save_signal_to_hf(signal: Dict, module: str):
         print(f"  File size: {os.path.getsize(temp_file)} bytes")
         print(f"  Selected ETF: {signal.get('selected_etf', 'N/A')}")
 
-        # Upload to signals folder
         path_in_repo = f"signals/{module}_signal.json"
         print(f"Uploading to: {path_in_repo}")
 
-        # Upload file
-        try:
-            result = api.upload_file(
-                path_or_fileobj=temp_file,
-                path_in_repo=path_in_repo,
-                repo_id=HF_DATASET_REPO,
-                repo_type="dataset",
-                commit_message=f"Update {module} signal for {signal.get('date', 'unknown')}",
-            )
-            print(f"✓ Successfully uploaded: {path_in_repo}")
-        except Exception as upload_error:
-            print(f"⚠ First upload attempt failed: {upload_error}")
-            print("Trying alternative upload method...")
+        result = api.upload_file(
+            path_or_fileobj=temp_file,
+            path_in_repo=path_in_repo,
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset",
+            commit_message=f"Update {module} signal for {signal.get('date', 'unknown')}",
+        )
+        print(f"✓ Successfully uploaded: {path_in_repo}")
 
-            # Alternative: try with explicit branch
-            result = api.upload_file(
-                path_or_fileobj=temp_file,
-                path_in_repo=path_in_repo,
-                repo_id=HF_DATASET_REPO,
-                repo_type="dataset",
-                commit_message=f"Update {module} signal",
-                create_pr=False,
-            )
-            print(f"✓ Alternative upload succeeded: {path_in_repo}")
-
-        # Also append to history
+        # Append to history
         try:
             history_file = f"/tmp/{module}_history.json"
             history = []
@@ -361,9 +316,8 @@ def save_signal_to_hf(signal: Dict, module: str):
                 with open(existing_path, 'r') as f:
                     history = json.load(f)
                 print(f"✓ Loaded existing history: {len(history)} records")
-            except Exception as e:
+            except Exception:
                 print(f"ℹ No existing history (OK for first run)")
-                history = []
 
             history.append(signal)
 
@@ -398,14 +352,12 @@ def main():
     print(f"Started: {datetime.now().isoformat()}")
     print("=" * 60)
 
-    # Parameters
-    ETA = 0.5  # Risk aversion
-    HORIZONS = [21, 63, 126]  # Days
-    N_PATHS = 10000  # Synthetic paths
+    ETA = 0.5
+    HORIZONS = [21, 63, 126]
+    N_PATHS = 10000
 
     results = {}
 
-    # Process Equity Module
     print("\n>>> Starting Equity Module Processing <<<")
     try:
         equity_signal = process_module(
@@ -427,7 +379,6 @@ def main():
         equity_signal = {"error": str(e), "module": "equity"}
         results["equity"] = equity_signal
 
-    # Process Fixed Income Module
     print("\n>>> Starting Fixed Income Module Processing <<<")
     try:
         fi_signal = process_module(
@@ -449,7 +400,6 @@ def main():
         fi_signal = {"error": str(e), "module": "fixed_income"}
         results["fixed_income"] = fi_signal
 
-    # Summary
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
