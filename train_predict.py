@@ -197,7 +197,14 @@ def process_module(
             # Predict for current state (t=0, W=W0, current_regime)
             selected_idx, weights = predict_optimal_etf(model, 0.0, 0.0, current_regime)
 
-            # Validate that weights are not NaN
+            # DEBUG: print mu and sample weights
+            mu = params[current_regime]["mu"]
+            print(f"  DEBUG: mu for regime {current_regime} (first 5): {mu[:5]}")
+            print(f"  DEBUG: sample weights from ANN (first 5): {weights[:5]}")
+            print(f"  DEBUG: mean of mu = {np.mean(mu):.6f}")
+            print(f"  DEBUG: sum of weights = {np.sum(weights):.6f}")
+
+            # Validate weights
             if np.any(np.isnan(weights)):
                 print(f"  WARNING: NaN in ann_weights, replacing with equal weights")
                 weights = np.ones(len(etfs)) / len(etfs)
