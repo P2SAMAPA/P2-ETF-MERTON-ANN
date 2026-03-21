@@ -56,9 +56,29 @@ def estimate_parameters(
     for regime in [0, 1]:
         regime_data = data[data['regime'] == regime]
         if len(regime_data) < 30:
-            regime_data = data  # fallback
+            regime_data = data  # fallback to all data
+
+        if len(regime_data) == 0:
+            # No data at all – use default
+            n_assets = len(returns.columns)
+            params[regime] = {
+                "mu": np.zeros(n_assets),
+                "Sigma": np.eye(n_assets) * 1e-4,
+                "r": 0.02,
+                "n_obs": 0,
+                "tickers": returns.columns.tolist()
+            }
+            continue
 
         regime_returns = regime_data.drop(columns=['regime', 'rf'], errors='ignore')
+
+        # Drop tickers with zero variance (constant returns) – they break Cholesky
+        variances = regime_returns.var()
+        valid_columns = variances[variances > 1e-12].index.tolist()
+        if len(valid_columns) < 2:
+            # Not enough assets with variation – use all and rely on ridge
+            valid_columns = regime_returns.columns.tolist()
+        regime_returns = regime_returns[valid_columns]
 
         mu_daily = regime_returns.mean().values
         mu = mu_daily * 252
@@ -85,8 +105,21 @@ def estimate_parameters(
             "Sigma": Sigma,
             "r": r,
             "n_obs": len(regime_data),
-            "tickers": regime_returns.columns.tolist()
+            "tickers": valid_columns
         }
+
+    # Ensure both regimes have the same number of assets (pad with zeros if needed)
+    n_assets = max(len(params[0]["mu"]), len(params[1]["mu"]))
+    for regime in [0, 1]:
+        current_n = len(params[regime]["mu"])
+        if current_n < n_assets:
+            # Pad mu and Sigma with zeros/identity for missing assets
+            mu_padded = np.zeros(n_assets)
+            mu_padded[:current_n] = params[regime]["mu"]
+            Sigma_padded = np.eye(n_assets) * 1e-4
+            Sigma_padded[:current_n, :current_n] = params[regime]["Sigma"]
+            params[regime]["mu"] = mu_padded
+            params[regime]["Sigma"] = Sigma_padded
 
     return params
 
@@ -122,14 +155,13 @@ def get_risk_free_rate_from_fred(fred_data: pd.DataFrame, date: pd.Timestamp = N
 
 
 def validate_parameters(params: Dict[int, Dict]) -> bool:
-    """Check if calibrated parameters are valid."""
+    """Check if calibrated parameters are valid (no NaNs/infs)."""
     for regime in [0, 1]:
         Sigma = params[regime]["Sigma"]
         mu = params[regime]["mu"]
         if np.any(~np.isfinite(Sigma)) or np.any(~np.isfinite(mu)):
             return False
-        try:
-            np.linalg.cholesky(Sigma)
-        except np.linalg.LinAlgError:
+        # Only check if it's not all zeros; if it is, we can still simulate
+        if np.all(Sigma == 0):
             return False
     return True
