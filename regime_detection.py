@@ -13,9 +13,11 @@ from typing import Tuple, Dict, Any
 def geometric_moving_average(series: pd.Series, window: int = 252) -> pd.Series:
     """
     Compute geometric moving average: MA_t = exp((1/window) * sum(log(x_{t-i})))
-    Used for VIX (equity) and MOVE (fixed income) regime indicators.
+    Handles missing values by forward filling first.
     """
-    log_series = np.log(series)
+    # Fill any leading NaNs with first valid value to avoid log(0) or missing
+    series_filled = series.fillna(method='ffill').fillna(1.0)  # fallback to 1.0
+    log_series = np.log(np.clip(series_filled, 1e-6, None))   # avoid log(0)
     ma = log_series.rolling(window=window, min_periods=window).mean()
     return np.exp(ma)
 
@@ -49,7 +51,6 @@ def detect_regime_threshold(regime_indicator: pd.Series, window: int = 252) -> f
 def classify_regime(regime_indicator: pd.Series, threshold: float, window: int = 252) -> pd.Series:
     """
     Classify each date as risk-on (0) or risk-off (1) based on threshold.
-    Returns series of 0/1 labels aligned with input index.
     """
     gma = geometric_moving_average(regime_indicator, window)
     # risk-on = 0 (low vol, below threshold), risk-off = 1 (high vol, above threshold)
@@ -58,55 +59,34 @@ def classify_regime(regime_indicator: pd.Series, threshold: float, window: int =
 
 
 def compute_regime_durations(regime_series: pd.Series) -> Tuple[pd.Series, pd.Series]:
-    """
-    Compute durations of consecutive regime periods.
-    Returns (risk_on_durations, risk_off_durations) in days.
-    """
-    # Find regime changes
+    """Compute durations of consecutive regime periods."""
     regime_changes = regime_series.diff().ne(0).cumsum()
-
     risk_on_durations = []
     risk_off_durations = []
 
     for regime_id, group in regime_series.groupby(regime_changes):
         duration = len(group)
         regime_value = group.iloc[0]
-        if regime_value == 0:  # risk-on
+        if regime_value == 0:
             risk_on_durations.append(duration)
-        else:  # risk-off
+        else:
             risk_off_durations.append(duration)
 
     return pd.Series(risk_on_durations), pd.Series(risk_off_durations)
 
 
 def estimate_semi_markov_parameters(regime_series: pd.Series) -> Dict[str, Any]:
-    """
-    Estimate semi-Markov transition parameters from historical regime durations.
-
-    Returns dict with:
-    - p_01: prob of switching from risk-on to risk-off
-    - p_10: prob of switching from risk-off to risk-on
-    - mean_duration_on: average days in risk-on
-    - mean_duration_off: average days in risk-off
-    - lambda_on: exponential rate parameter for risk-on (1/mean)
-    - lambda_off: exponential rate parameter for risk-off
-    """
+    """Estimate semi-Markov transition parameters from historical regime durations."""
     risk_on_dur, risk_off_dur = compute_regime_durations(regime_series)
 
     mean_duration_on = risk_on_dur.mean() if len(risk_on_dur) > 0 else 252
     mean_duration_off = risk_off_dur.mean() if len(risk_off_dur) > 0 else 126
 
-    # Daily transition probabilities (exponential holding times)
     lambda_on = 1.0 / mean_duration_on if mean_duration_on > 0 else 0.004
     lambda_off = 1.0 / mean_duration_off if mean_duration_off > 0 else 0.008
 
-    # Approximate daily transition probs
-    p_01 = lambda_on  # risk-on to risk-off
-    p_10 = lambda_off  # risk-off to risk-on
-
-    # Ensure valid probabilities
-    p_01 = min(p_01, 0.5)
-    p_10 = min(p_10, 0.5)
+    p_01 = min(lambda_on, 0.5)
+    p_10 = min(lambda_off, 0.5)
 
     return {
         "p_01": p_01,
@@ -121,19 +101,14 @@ def estimate_semi_markov_parameters(regime_series: pd.Series) -> Dict[str, Any]:
 
 
 def get_current_regime(regime_indicator: pd.Series, threshold: float, window: int = 252) -> int:
-    """
-    Get the most recent regime classification.
-    Returns 0 for risk-on, 1 for risk-off.
-    """
+    """Get the most recent regime classification."""
     gma = geometric_moving_average(regime_indicator, window)
     current_gma = gma.iloc[-1]
     return 1 if current_gma > threshold else 0
 
 
 def full_regime_analysis(regime_indicator: pd.Series, window: int = 252) -> Dict[str, Any]:
-    """
-    Complete regime analysis: threshold, full history, current regime, and semi-Markov params.
-    """
+    """Complete regime analysis: threshold, full history, current regime, and semi-Markov params."""
     threshold = detect_regime_threshold(regime_indicator, window)
     regime_history = classify_regime(regime_indicator, threshold, window)
     current_regime = regime_history.iloc[-1]
