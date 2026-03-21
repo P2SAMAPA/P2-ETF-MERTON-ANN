@@ -41,9 +41,11 @@ def estimate_parameters(
 ) -> Dict[int, Dict[str, np.ndarray]]:
     """Estimate μ, Σ, r for each regime (0=risk-on, 1=risk-off)."""
     data = returns.copy()
-    data['regime'] = regime_labels.reindex(data.index)
+    # Align regime_labels to returns index
+    regime_aligned = regime_labels.reindex(data.index, fill_value=0)
+    data['regime'] = regime_aligned
     if risk_free_rates is not None:
-        data['rf'] = risk_free_rates.reindex(data.index)
+        data['rf'] = risk_free_rates.reindex(data.index, fill_value=0.0)
     else:
         data['rf'] = 0.0
     data = data.dropna()
@@ -52,9 +54,9 @@ def estimate_parameters(
         start_date = current_date - pd.DateOffset(years=10)
         data = data[data.index >= start_date]
 
-    # DEBUG: Print mean daily returns from raw data (first 5 columns)
-    print(f"  DEBUG (calibration): Mean daily log returns (first 5 columns) for {window_type} window:")
-    print(f"    {returns.iloc[:, :5].mean().values}")
+    # Debug: print first few rows of data to see regime column
+    print(f"  DEBUG (calibration): First 5 regime values in {window_type} window: {data['regime'].iloc[:5].values}")
+    print(f"  DEBUG (calibration): Mean daily log returns (first 5 columns): {returns.iloc[:, :5].mean().values}")
 
     params = {}
     for regime in [0, 1]:
@@ -81,19 +83,17 @@ def estimate_parameters(
         variances = regime_returns.var()
         valid_columns = variances[variances > 1e-12].index.tolist()
         if len(valid_columns) < 2:
-            # Not enough assets with variation – use all and rely on ridge
             valid_columns = regime_returns.columns.tolist()
         regime_returns = regime_returns[valid_columns]
 
         mu_daily = regime_returns.mean().values
         mu = mu_daily * 252
 
-        # If mu is all zero, fall back to global mean (across all regimes)
+        # If mu is all zero, fall back to global mean
         if np.allclose(mu, 0.0):
             print(f"  WARNING: Regime {regime} mu is zero. Falling back to global mean.")
             global_mu_daily = returns.mean().values
             global_mu = global_mu_daily * 252
-            # Align dimensions
             if len(global_mu) > len(mu):
                 mu = global_mu[:len(mu)]
             elif len(global_mu) < len(mu):
@@ -115,7 +115,6 @@ def estimate_parameters(
         # Risk-free rate
         r = regime_data['rf'].mean() * 252 if 'rf' in regime_data.columns else 0.02
 
-        # Replace any remaining NaNs/Infs
         mu = np.nan_to_num(mu, nan=0.0)
         Sigma = np.nan_to_num(Sigma, nan=0.0)
 
@@ -127,7 +126,7 @@ def estimate_parameters(
             "tickers": valid_columns
         }
 
-    # Ensure both regimes have the same number of assets (pad with zeros if needed)
+    # Ensure both regimes have the same number of assets
     n_assets = max(len(params[0]["mu"]), len(params[1]["mu"]))
     for regime in [0, 1]:
         current_n = len(params[regime]["mu"])
