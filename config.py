@@ -50,7 +50,6 @@ FI_ETFS = [
     "GLD",   # Gold
     "SLV",   # Silver
     "VNQ",   # REITs
-    "DBC",   # Commodities Broad
     "EMB",   # Emerging Market Bonds
 ]
 FI_START = "2007-01-01"
