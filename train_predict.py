@@ -18,16 +18,17 @@ def main():
     option = os.environ.get("OPTION", "A")
     print(f"Running Option {option}")
 
-    # Parameters
+    # Parameters (adjustable via environment)
     ETA = 0.5
     HORIZONS = [21, 63, 126]
-    N_PATHS = 10000
+    N_PATHS = int(os.environ.get("N_PATHS", "2000"))   # reduced to 2000
+    EPOCHS = int(os.environ.get("EPOCHS", "200"))      # 200 epochs
 
     # Process Equity
     print("\n>>> Starting Equity Module Processing <<<")
     try:
         equity_signal = process_module(
-            "equity", EQUITY_ETFS, EQUITY_REGIME, option, HORIZONS, ETA, N_PATHS
+            "equity", EQUITY_ETFS, EQUITY_REGIME, option, HORIZONS, ETA, N_PATHS, EPOCHS
         )
         print(f"Equity processing complete. Signal: {equity_signal.get('selected_etf', 'ERROR')}")
         save_signal_to_hf(equity_signal, "equity", option)
@@ -40,7 +41,7 @@ def main():
     print("\n>>> Starting Fixed Income Module Processing <<<")
     try:
         fi_signal = process_module(
-            "fixed_income", FI_ETFS, FI_REGIME, option, HORIZONS, ETA, N_PATHS
+            "fixed_income", FI_ETFS, FI_REGIME, option, HORIZONS, ETA, N_PATHS, EPOCHS
         )
         print(f"Fixed Income processing complete. Signal: {fi_signal.get('selected_etf', 'ERROR')}")
         save_signal_to_hf(fi_signal, "fi", option)
