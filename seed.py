@@ -8,9 +8,10 @@ Fetches:
   - OHLCV for all FI ETFs + AGG benchmark + ^MOVE      (from 2008-01-01)
   - FRED macro series for both modules                  (from 2005-01-01)
 
-Pushes two parquet files to HF dataset P2SAMAPA/p2-etf-merton-ann-data:
+Pushes three parquet files to HF dataset P2SAMAPA/p2-etf-merton-ann-data:
   - data/equity.parquet
   - data/fixed_income.parquet
+  - data/fred_macro.parquet
 
 Run once via GitHub Actions (seed.yml) or locally:
     HF_TOKEN=xxx FRED_API_KEY=xxx python seed.py
@@ -213,6 +214,12 @@ def main():
     log.info("\nFetching FRED macro series ...")
     macro_df = fetch_all_fred(start=cfg.FRED_START)
     log.info(f"  Macro: {len(macro_df)} rows, {macro_df.shape[1]} series")
+
+    if not macro_df.empty:
+        # Save macro separately
+        push_to_hf(macro_df, "fred_macro.parquet")
+    else:
+        log.warning("Macro DataFrame is empty; not saving macro file.")
 
     # ── Equity module ─────────────────────────────────────────────────────────
     equity_df = build_module(
