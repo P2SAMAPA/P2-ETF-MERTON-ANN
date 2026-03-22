@@ -35,8 +35,7 @@ def load_prices(module: str):
             filename=filename,
             repo_type="dataset",
             token=HF_TOKEN,
-            local_dir="/tmp",
-            local_dir_use_symlinks=False
+            local_dir="/tmp"
         )
         df = pd.read_parquet(path)
         # Extract close prices for all ETFs (assume column pattern *Close)
@@ -52,7 +51,7 @@ def load_signal(module: str, option: str = "A"):
     suffix = "" if option == "A" else f"_option{option}"
     try:
         filename = f"signals/{module}_signal{suffix}.json"
-        path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=filename, repo_type="dataset", token=HF_TOKEN, local_dir="/tmp", local_dir_use_symlinks=False)
+        path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=filename, repo_type="dataset", token=HF_TOKEN, local_dir="/tmp")
         with open(path) as f:
             return json.load(f)
     except Exception as e:
@@ -63,7 +62,7 @@ def load_history(module: str, option: str = "A"):
     suffix = "" if option == "A" else f"_option{option}"
     try:
         filename = f"signals/{module}_history{suffix}.json"
-        path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=filename, repo_type="dataset", token=HF_TOKEN, local_dir="/tmp", local_dir_use_symlinks=False)
+        path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=filename, repo_type="dataset", token=HF_TOKEN, local_dir="/tmp")
         with open(path) as f:
             return json.load(f)
     except:
@@ -238,7 +237,7 @@ with tab2:
     hist_eq = load_history("equity", option)
     if hist_eq:
         df_eq = format_history_with_returns(hist_eq, price_eq, "equity")
-        st.dataframe(df_eq, use_container_width=True)
+        st.dataframe(df_eq, width='stretch')
     else:
         st.info("No equity history yet.")
 
@@ -247,7 +246,7 @@ with tab2:
     hist_fi = load_history("fi", option)
     if hist_fi:
         df_fi = format_history_with_returns(hist_fi, price_fi, "fixed_income")
-        st.dataframe(df_fi, use_container_width=True)
+        st.dataframe(df_fi, width='stretch')
     else:
         st.info("No fixed income history yet.")
 
