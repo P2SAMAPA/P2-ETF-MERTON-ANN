@@ -21,8 +21,8 @@ def main():
     # Parameters (adjustable via environment)
     ETA = 0.5
     HORIZONS = [21, 63, 126]
-    N_PATHS = int(os.environ.get("N_PATHS", "2000"))   # reduced to 2000
-    EPOCHS = int(os.environ.get("EPOCHS", "200"))      # 200 epochs
+    N_PATHS = int(os.environ.get("N_PATHS", "8000"))   # increased to 8000
+    EPOCHS = int(os.environ.get("EPOCHS", "300"))      # increased to 300
 
     # Process Equity
     print("\n>>> Starting Equity Module Processing <<<")
