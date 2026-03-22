@@ -46,11 +46,8 @@ The paper uses VIX for all assets including bonds. VIX measures equity option im
 ### Step 1 — Regime Detection
 
 For each module, compute the 12-month geometric moving average of the regime indicator:
-
-```
-MA_t = exp( (1/252) x sum( log(VIX_{t-i}) ) )   [equity]
-MA_t = exp( (1/252) x sum( log(MOVE_{t-i}) ) )  [fixed income]
-```
+MA_t = exp( (1/252) x sum( log(VIX_{t-i}) ) ) [equity]
+MA_t = exp( (1/252) x sum( log(MOVE_{t-i}) ) ) [fixed income]
 
 K-means clustering (K=2) on the log-transformed moving averages produces a threshold separating **risk-on** (low vol, invest) from **risk-off** (high vol, defensive) regimes. The semi-Markov property captures the empirically observed long holding times per regime (~4.5 years average), which standard HMM cannot model.
 
@@ -58,7 +55,7 @@ K-means clustering (K=2) on the log-transformed moving averages produces a thres
 
 For each regime separately, estimate from historical ETF returns:
 - **mu(regime)** — mean return vector per ETF
-- **Sigma(regime)** — covariance matrix across ETFs
+- **Sigma(regime)** — covariance matrix across ETFs (using Ledoit‑Wolf shrinkage)
 - **r(regime)** — risk-free rate (DTB3 from FRED)
 
 ### Step 3 — Synthetic Data Generation
@@ -67,38 +64,68 @@ Using calibrated parameters, simulate 10,000+ synthetic portfolio paths under a 
 
 ### Step 4 — ANN Training (daily)
 
-A small MLP with one hidden layer (~50 parameters) trained via SGD to maximise expected isoelastic utility of terminal wealth:
+A small MLP with one hidden layer (5 or 10 neurons) trained via SGD to maximise expected isoelastic utility of terminal wealth:
+U(W) = W^(1-eta) / (1-eta) [eta != 1]
+U(W) = log(W) [eta = 1]
 
-```
-U(W) = W^(1-eta) / (1-eta)    [eta != 1]
-U(W) = log(W)                  [eta = 1]
-```
-
-**Inputs:** (t/T, log(W/W0), regime)
+**Inputs:** (t/T, log(W/W0), regime) for baseline; plus 6 macro indicators (rolling z‑score) for the enhanced variant.  
 **Outputs:** Portfolio weights — softmax-normalised, long-only, sum to 1
 
 ### Step 5 — Signal Generation
 
 Winner-takes-all argmax selects the single highest-weighted ETF. The next NYSE trading date is computed via `pandas_market_calendars` to ensure the UI always shows the correct hold date accounting for weekends and holidays.
 
-### Daily Pipeline
+---
 
-```
-21:30 UTC  ->  daily_data_update.py    append new trading day to HF dataset
-22:00 UTC  ->  train_predict.py        recalibrate + retrain ANN + predict
-                    |
-                    v
-               Results pushed to HF dataset
-                    |
-                    v
-               Streamlit dashboard updates automatically
-```
+## Model Variants
+
+To explore the impact of macroeconomic information and ensemble methods, the pipeline runs **two independent models daily**, each producing its own signal and historical record. Both share the same core Merton-ANN framework but differ in inputs and post-processing:
+
+| Feature | **Option A (Baseline)** | **Option B (Enhanced)** |
+|---|---|---|
+| **Input features** | `[t/T, log(W/W0), regime]` (3 features) | `[t/T, log(W/W0), regime]` + **6 macro indicators** (rolling z‑scores):<br/>• 10Y Treasury yield (DGS10)<br/>• 10Y-2Y spread (T10Y2Y)<br/>• High yield credit spread (BAMLH0A0HYM2)<br/>• WTI crude oil (DCOILWTICO)<br/>• USD broad index (DTWEXBGS)<br/>• 10Y breakeven inflation (T10YIE) |
+| **Synthetic data generation** | Bootstrap historical macro sequences to preserve temporal dynamics |
+| **Model selection** | Single best (window, horizon) by validation return | Ensemble of **top‑3 models** (by validation return) averaged |
+| **Hyperparameter tuning** | Tests hidden size {5,10} and learning rate {0.001,0.01} for each (window, horizon) |
+| **Covariance estimation** | Ledoit‑Wolf shrinkage (more stable) for both |
+| **Output files** | `signals/equity_signal.json`<br/>`signals/fi_signal.json`<br/>`signals/equity_history.json`<br/>`signals/fi_history.json` | `signals/equity_signal_optionB.json`<br/>`signals/fi_signal_optionB.json`<br/>`signals/equity_history_optionB.json`<br/>`signals/fi_history_optionB.json` |
+
+Both variants run in parallel via GitHub Actions, completing in about the same time as a single model (~2.5 hours). The Streamlit dashboard allows you to switch between them and compare signals, expected returns, and historical performance, including **actual daily returns** for past predictions.
+
+---
+
+### Macro Feature Engineering
+
+For Option B, macro series are aligned to trading days and transformed using a rolling z‑score (window = 252 days) to make them stationary. During synthetic data generation, each simulated path randomly selects a contiguous historical macro segment, preserving the autocorrelation and cross‑correlations among macro variables. This bootstrap approach avoids the need for complex VAR modelling and keeps the simulation efficient.
+
+---
+
+### Ensemble Averaging
+
+For each (window, horizon) pair, Option B trains models with the two hidden sizes and two learning rates, selecting the best hyperparameters based on validation expected return. After evaluating all windows and horizons, the top‑3 models (by validation return) are averaged to produce the final portfolio weights. This reduces overfitting to a single configuration and often yields more robust signals.
+
+---
+
+## Daily Pipeline
+
+The GitHub Actions workflow now runs both Option A and Option B concurrently:
+21:30 UTC -> daily_data_update.py append new trading day + fetch FRED data
+22:00 UTC -> train_predict.yml (two parallel jobs)
+|
++-- Option A (baseline)
++-- Option B (macro + ensemble)
+|
+v
+Results pushed to HF dataset (separate files)
+|
+v
+Streamlit dashboard updates automatically
 
 ---
 
 ## ETF Universe
 
-### Option A — Equity (Benchmark: SPY, Regime: ^VIX)
+### Equity Universe (Benchmark: SPY, Regime: ^VIX)
 
 | Ticker | Description |
 |---|---|
@@ -118,7 +145,7 @@ Winner-takes-all argmax selects the single highest-weighted ETF. The next NYSE t
 | EEM | Emerging Markets |
 | EFA | Developed International |
 
-### Option B — Fixed Income + Real Assets (Benchmark: AGG, Regime: ^MOVE)
+### Fixed Income & Real Assets (Benchmark: AGG, Regime: ^MOVE)
 
 | Ticker | Description |
 |---|---|
@@ -136,7 +163,9 @@ Winner-takes-all argmax selects the single highest-weighted ETF. The next NYSE t
 | DBC | Broad Commodities |
 | EMB | Emerging Market Bonds |
 
-### Macro Indicators (FRED — both modules)
+---
+
+## Macro Indicators (FRED — both modules)
 
 | Series | Description |
 |---|---|
@@ -153,43 +182,43 @@ Winner-takes-all argmax selects the single highest-weighted ETF. The next NYSE t
 ---
 
 ## Infrastructure
-
-```
-READ  data from:  P2SAMAPA/p2-etf-merton-ann-data
-WRITE results to: P2SAMAPA/p2-etf-merton-ann-data
-                  +-- data/equity.parquet
-                  +-- data/fixed_income.parquet
-                  +-- signals/equity_signal.json
-                  +-- signals/fi_signal.json
-                  +-- signals/equity_history.json
-                  +-- signals/fi_history.json
-DISPLAY at:       Streamlit.io
-TRAINING on:      GitHub Actions free tier (CPU, <1 min — ANN is ~50 params)
-```
+READ data from: P2SAMAPA/p2-etf-merton-ann-data
+WRITE results to: same repository
++-- data/equity.parquet
++-- data/fixed_income.parquet
++-- data/fred_macro.parquet
++-- signals/equity_signal.json
++-- signals/equity_signal_optionB.json
++-- signals/fi_signal.json
++-- signals/fi_signal_optionB.json
++-- signals/equity_history.json
++-- signals/equity_history_optionB.json
++-- signals/fi_history.json
++-- signals/fi_history_optionB.json
+DISPLAY at: Streamlit.io (option selector in sidebar)
+TRAINING on: GitHub Actions free tier (CPU, ~2.5h for both in parallel)
 
 ---
 
 ## Repository Structure
-
-```
 P2-ETF-MERTON-ANN/
 |
 +-- .github/workflows/
-|   +-- seed.yml                  # ONE-TIME: seed full history
-|   +-- daily_data_update.yml     # DAILY 21:30 UTC: append new day
-|   +-- train_predict.yml         # DAILY 22:00 UTC: retrain + predict
+| +-- seed.yml # ONE-TIME: seed full history
+| +-- daily_data_update.yml # DAILY 21:30 UTC: append new day
+| +-- train_predict.yml # DAILY 22:00 UTC: retrain + predict (two jobs)
 |
-+-- config.py                     # ETF universes, FRED series, HF config
-+-- seed.py                       # One-time full history seed
-+-- daily_data_update.py          # Incremental daily data append
-+-- regime_detection.py           # VIX/MOVE geometric MA + K-means
-+-- calibration.py                # Estimate mu, Sigma, r per regime
-+-- simulation.py                 # Synthetic GBM path generation
-+-- ann_model.py                  # MLP ANN feedback controller
-+-- train_predict.py              # Daily: calibrate + simulate + train + predict
-+-- app.py                        # Streamlit dashboard
++-- config.py # ETF universes, FRED series, HF config
++-- seed.py # One-time full history seed
++-- daily_data_update.py # Incremental daily data append + FRED fetch
++-- regime_detection.py # VIX/MOVE geometric MA + K-means
++-- calibration.py # Estimate mu, Sigma, r per regime (Ledoit‑Wolf)
++-- simulation.py # Synthetic GBM path generation (macro bootstrap)
++-- ann_model.py # MLP ANN feedback controller (variable input)
++-- train_predict.py # Daily: calibrate + simulate + train + predict
++-- utils.py # Shared utilities for both model variants
++-- app.py # Streamlit dashboard (option selector, history)
 +-- requirements.txt
-```
 
 ---
 
@@ -209,10 +238,10 @@ P2-ETF-MERTON-ANN/
 Actions -> Seed Historical Data -> Run workflow (~10-15 minutes)
 
 **2. Run first training + prediction**
-Actions -> Daily Train + Predict -> Run workflow
+Actions -> Daily Train + Predict -> Run workflow (both Option A and Option B will run)
 
 **3. View the dashboard**
-Open the Streamlit app linked in the repo description.
+Open the Streamlit app linked in the repo description. Use the sidebar to switch between Option A and Option B, and explore the "Historical Performance" tab to see past signals with actual returns.
 
 ---
 
@@ -239,4 +268,3 @@ Open the Streamlit app linked in the repo description.
   url         = {https://finance-business.media.uconn.edu/wp-content/uploads/
                  sites/723/2025/02/Michael-Polojovy-Paper.pdf}
 }
-```
