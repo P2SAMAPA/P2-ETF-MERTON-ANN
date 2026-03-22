@@ -235,9 +235,15 @@ def process_module(
     if option == "B":
         returns = compute_returns(prices, etfs)
         macro_z = preprocess_macro(fred_df, returns.index)
-        # We'll pass macro_z to simulation later
+        # Get the current macro values (for the last date in returns)
+        if not macro_z.empty and current_date in macro_z.index:
+            current_macro = macro_z.loc[current_date].values
+        else:
+            current_macro = np.zeros(len(macro_z.columns)) if not macro_z.empty else np.array([])
+        print(f"  Current macro features shape: {current_macro.shape}")
     else:
         macro_z = None
+        current_macro = None
 
     best_result = None
     best_expected_return = -np.inf
@@ -289,8 +295,11 @@ def process_module(
                         print(f"    ✗ Error training ANN (hidden={hidden_size}, lr={lr}): {e}")
                         continue
 
-                    # Predict for current state
-                    selected_idx, weights = predict_optimal_etf(model, 0.0, 0.0, current_regime)
+                    # Predict for current state (with macro if needed)
+                    selected_idx, weights = predict_optimal_etf(
+                        model, 0.0, 0.0, current_regime,
+                        macro_features=current_macro
+                    )
 
                     # Evaluate on validation set (last 1000 samples)
                     X_val = training_data["X"][-1000:]
@@ -361,6 +370,8 @@ def process_module(
     else:  # Option A
         if best_model is None:
             return {"error": "No valid training result for Option A"}
+        # For Option A, we already have best_weights from the loop
+        selected_idx = np.argmax(best_weights)
         best_result = {
             "selected_etf": etfs[selected_idx],
             "selected_idx": int(selected_idx),
