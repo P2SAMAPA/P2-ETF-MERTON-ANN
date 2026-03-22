@@ -111,6 +111,15 @@ def display_calibration_details(signal: dict, module_name: str):
     else:
         st.info("No semi‑Markov parameters available.")
 
+def display_large_table(df: pd.DataFrame):
+    """Display a DataFrame with larger font."""
+    # Convert to HTML with inline style for larger font
+    html = df.to_html(escape=False, index=False)
+    st.markdown(
+        f"<div style='font-size: 18px'>{html}</div>",
+        unsafe_allow_html=True
+    )
+
 # ----------------------------------------------------------------------
 # Sidebar – Debug Info & Last Update
 # ----------------------------------------------------------------------
@@ -192,14 +201,7 @@ if equity_signal:
     if weights:
         st.subheader("Portfolio Weights")
         df_weights = format_weights(weights, top_n=10)
-        col_left, col_right = st.columns([1, 1])
-        with col_left:
-            st.dataframe(df_weights[["ETF", "Weight (%)"]], use_container_width=True)
-        with col_right:
-            for _, row in df_weights.iterrows():
-                pct = row["Weight"] * 100
-                st.markdown(f"**{row['ETF']}**")
-                st.progress(pct / 100, text=f"{row['Weight (%)']}")
+        display_large_table(df_weights[["ETF", "Weight (%)"]])
     else:
         st.info("No weights available.")
 
@@ -212,7 +214,7 @@ if equity_signal:
             df_all = df_all.sort_values("Weight", ascending=False).reset_index(drop=True)
             df_all["Weight (%)"] = df_all["Weight"] * 100
             df_all["Weight (%)"] = df_all["Weight (%)"].map("{:.2f}%".format)
-            st.dataframe(df_all[["ETF", "Weight (%)"]], use_container_width=True)
+            display_large_table(df_all[["ETF", "Weight (%)"]])
         else:
             st.info("No weights available.")
 
@@ -253,14 +255,9 @@ if fi_signal:
     if weights:
         st.subheader("Portfolio Weights")
         df_weights = format_weights(weights, top_n=10)
-        col_left, col_right = st.columns([1, 1])
-        with col_left:
-            st.dataframe(df_weights[["ETF", "Weight (%)"]], use_container_width=True)
-        with col_right:
-            for _, row in df_weights.iterrows():
-                pct = row["Weight"] * 100
-                st.markdown(f"**{row['ETF']}**")
-                st.progress(pct / 100, text=f"{row['Weight (%)']}")
+        display_large_table(df_weights[["ETF", "Weight (%)"]])
+    else:
+        st.info("No weights available.")
 
     with st.expander("🔍 Model Details & Parameters"):
         display_calibration_details(fi_signal, "fi")
@@ -271,7 +268,7 @@ if fi_signal:
             df_all = df_all.sort_values("Weight", ascending=False).reset_index(drop=True)
             df_all["Weight (%)"] = df_all["Weight"] * 100
             df_all["Weight (%)"] = df_all["Weight (%)"].map("{:.2f}%".format)
-            st.dataframe(df_all[["ETF", "Weight (%)"]], use_container_width=True)
+            display_large_table(df_all[["ETF", "Weight (%)"]])
         else:
             st.info("No weights available.")
 
