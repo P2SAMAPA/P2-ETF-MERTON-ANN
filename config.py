@@ -23,6 +23,7 @@ EQUITY_ETFS = [
     "XLK",   # Technology
     "XLF",   # Financials
     "XLE",   # Energy
+    "XME",   # Metals & Mining
     "XLV",   # Health Care
     "XLI",   # Industrials
     "XLY",   # Consumer Discretionary
