@@ -8,6 +8,7 @@ pyarrow>=16.1.0
 huggingface-hub>=0.23.4
 datasets>=2.14.0          # HuggingFace datasets library
 requests>=2.31.0
+fredapi
 
 # ── Regime Detection & ML ───────────────────────────────────────────────────
 scikit-learn>=1.4.0      # K-means clustering for regime detection
