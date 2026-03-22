@@ -7,6 +7,7 @@ Supports both full history (2007+) and rolling 10-year windows.
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Literal
+from sklearn.covariance import LedoitWolf
 
 
 def compute_returns(prices: pd.DataFrame, tickers: list) -> pd.DataFrame:
