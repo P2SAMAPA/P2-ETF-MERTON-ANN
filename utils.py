@@ -189,7 +189,8 @@ def process_module(
     option: str = "A",
     horizons: List[int] = [21, 63, 126],
     eta: float = 0.5,
-    n_paths: int = 10000
+    n_paths: int = 2000,
+    epochs: int = 200
 ) -> Dict:
     """Process one module (equity or fixed_income) for a given option."""
     print(f"\n=== Processing {module} (Option {option}) ===")
@@ -255,6 +256,10 @@ def process_module(
     # Store candidates for ensemble (only Option B)
     candidate_models = []  # (expected_return, model, weights, horizon, window)
 
+    # Fixed hyperparameters
+    hidden_size = 10
+    learning_rate = 0.01
+
     for window_type, params in calibration_results.items():
         if not validate_parameters(params):
             print(f"⚠ Parameters for {window_type} appear invalid (NaNs/zeros). Skipping.")
@@ -277,67 +282,48 @@ def process_module(
                 print(f"  ✗ Error generating training data: {e}")
                 continue
 
-            # Hyperparameter tuning (small grid)
-            best_local_expected = -np.inf
-            best_local_model = None
-            best_local_weights = None
-            best_local_hparams = None
-
-            for hidden_size in [5, 10]:
-                for lr in [0.001, 0.01]:
-                    try:
-                        model = train_ann_for_horizon(
-                            training_data, len(etfs), eta,
-                            epochs=500, learning_rate=lr,
-                            hidden_size=hidden_size, input_dim=training_data["X"].shape[1]
-                        )
-                    except Exception as e:
-                        print(f"    ✗ Error training ANN (hidden={hidden_size}, lr={lr}): {e}")
-                        continue
-
-                    # Predict for current state (with macro if needed)
-                    selected_idx, weights = predict_optimal_etf(
-                        model, 0.0, 0.0, current_regime,
-                        macro_features=current_macro
-                    )
-
-                    # Evaluate on validation set (last 1000 samples)
-                    X_val = training_data["X"][-1000:]
-                    ann_weights = model.predict(X_val)
-                    ann_weights = np.nan_to_num(ann_weights, nan=1.0/len(etfs))
-
-                    mu = params[current_regime]["mu"]
-                    mu = np.nan_to_num(mu, nan=0.0)
-
-                    expected_returns = ann_weights @ mu
-                    avg_return = np.mean(expected_returns)
-                    if np.isnan(avg_return):
-                        avg_return = 0.0
-
-                    if avg_return > best_local_expected:
-                        best_local_expected = avg_return
-                        best_local_model = model
-                        best_local_weights = weights
-                        best_local_hparams = (hidden_size, lr)
-
-            if best_local_model is None:
-                print(f"  ✗ No successful training for horizon {T_days}.")
+            # Train ANN
+            try:
+                model = train_ann_for_horizon(
+                    training_data, len(etfs), eta,
+                    epochs=epochs, learning_rate=learning_rate,
+                    hidden_size=hidden_size, input_dim=training_data["X"].shape[1]
+                )
+            except Exception as e:
+                print(f"  ✗ Error training ANN: {e}")
                 continue
 
-            print(f"  Best hyperparameters: hidden={best_local_hparams[0]}, lr={best_local_hparams[1]}")
-            print(f"  Expected annualized return: {best_local_expected:.2%}")
+            # Predict for current state (with macro if needed)
+            selected_idx, weights = predict_optimal_etf(
+                model, 0.0, 0.0, current_regime,
+                macro_features=current_macro
+            )
 
-            # For Option B, collect top models for ensemble
+            # Evaluate on validation set (last 1000 samples)
+            X_val = training_data["X"][-1000:]
+            ann_weights = model.predict(X_val)
+            ann_weights = np.nan_to_num(ann_weights, nan=1.0/len(etfs))
+
+            mu = params[current_regime]["mu"]
+            mu = np.nan_to_num(mu, nan=0.0)
+
+            expected_returns = ann_weights @ mu
+            avg_return = np.mean(expected_returns)
+            if np.isnan(avg_return):
+                avg_return = 0.0
+
+            print(f"  Expected annualized return: {avg_return:.2%}")
+
+            # For Option B, collect models for ensemble
             if option == "B":
-                candidate_models.append((best_local_expected, best_local_model, best_local_weights, T_days, window_type))
-
-            # For Option A, select best overall
-            if option == "A" and best_local_expected > best_expected_return:
-                best_expected_return = best_local_expected
-                best_horizon = T_days
-                best_window = window_type
-                best_model = best_local_model
-                best_weights = best_local_weights
+                candidate_models.append((avg_return, model, weights, T_days, window_type))
+            else:  # Option A
+                if avg_return > best_expected_return:
+                    best_expected_return = avg_return
+                    best_horizon = T_days
+                    best_window = window_type
+                    best_model = model
+                    best_weights = weights
 
     # Option B ensemble: take average of top 3 models (or fewer if not enough)
     if option == "B":
@@ -370,7 +356,6 @@ def process_module(
     else:  # Option A
         if best_model is None:
             return {"error": "No valid training result for Option A"}
-        # For Option A, we already have best_weights from the loop
         selected_idx = np.argmax(best_weights)
         best_result = {
             "selected_etf": etfs[selected_idx],
