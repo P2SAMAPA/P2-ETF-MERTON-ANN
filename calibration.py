@@ -1,13 +1,13 @@
 """
 calibration.py — P2-ETF-MERTON-ANN
-Estimate μ (mean returns), Σ (covariance) using Ledoit‑Wolf shrinkage, and r per regime.
-Supports both full history and rolling 10-year windows.
+Estimate μ (mean returns), Σ (covariance), and r (risk-free rate) per regime.
+Supports both full history (2007+) and rolling 10-year windows.
+Uses Ledoit‑Wolf shrinkage for covariance estimation (if available) for improved stability.
 """
 
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Literal
-from sklearn.covariance import LedoitWolf
 
 
 def compute_returns(prices: pd.DataFrame, tickers: list) -> pd.DataFrame:
@@ -26,7 +26,7 @@ def compute_returns(prices: pd.DataFrame, tickers: list) -> pd.DataFrame:
 
     available_tickers = [t for t in tickers if t in close_prices.columns]
     if len(available_tickers) == 0:
-        raise ValueError(f"No tickers found. Looking for: {tickers[:5]}... Available: {list(prices.columns)[:10]}...")
+        raise ValueError(f"No tickers found in data. Looking for: {tickers[:5]}... Available: {list(prices.columns)[:10]}...")
 
     close_prices = close_prices[available_tickers]
     log_returns = np.log(close_prices / close_prices.shift(1))
@@ -42,6 +42,7 @@ def estimate_parameters(
 ) -> Dict[int, Dict[str, np.ndarray]]:
     """Estimate μ, Σ, r for each regime (0=risk-on, 1=risk-off)."""
     data = returns.copy()
+    # Align regime_labels to returns index
     regime_aligned = regime_labels.reindex(data.index, fill_value=0)
     data['regime'] = regime_aligned
     if risk_free_rates is not None:
@@ -54,13 +55,19 @@ def estimate_parameters(
         start_date = current_date - pd.DateOffset(years=10)
         data = data[data.index >= start_date]
 
+    # Debug: print first few regime values
+    print(f"  DEBUG (calibration): First 5 regime values in {window_type} window: {data['regime'].iloc[:5].values}")
+    print(f"  DEBUG (calibration): Mean daily log returns (first 5 columns): {returns.iloc[:, :5].mean().values}")
+
     params = {}
     for regime in [0, 1]:
         regime_data = data[data['regime'] == regime]
         if len(regime_data) < 30:
+            print(f"  WARNING: Regime {regime} has only {len(regime_data)} observations; using all data.")
             regime_data = data  # fallback to all data
 
         if len(regime_data) == 0:
+            # No data at all – use default
             n_assets = len(returns.columns)
             params[regime] = {
                 "mu": np.zeros(n_assets),
@@ -73,7 +80,7 @@ def estimate_parameters(
 
         regime_returns = regime_data.drop(columns=['regime', 'rf'], errors='ignore')
 
-        # Drop constant columns (zero variance)
+        # Drop tickers with zero variance (constant returns)
         variances = regime_returns.var()
         valid_columns = variances[variances > 1e-12].index.tolist()
         if len(valid_columns) < 2:
@@ -84,25 +91,49 @@ def estimate_parameters(
         mu_daily = regime_returns.mean().values
         mu = mu_daily * 252
 
-        # Covariance with Ledoit‑Wolf shrinkage
+        # If mu is all zero, fall back to global mean
+        if np.allclose(mu, 0.0):
+            print(f"  WARNING: Regime {regime} mu is zero. Falling back to global mean.")
+            global_mu_daily = returns.mean().values
+            global_mu = global_mu_daily * 252
+            if len(global_mu) > len(mu):
+                mu = global_mu[:len(mu)]
+            elif len(global_mu) < len(mu):
+                mu_padded = np.zeros(len(mu))
+                mu_padded[:len(global_mu)] = global_mu
+                mu = mu_padded
+            else:
+                mu = global_mu
+
+        # Covariance estimation – use Ledoit‑Wolf if available
         if len(regime_returns) > 1:
-            lw = LedoitWolf()
-            lw.fit(regime_returns.values)
-            Sigma_daily = lw.covariance_
+            try:
+                from sklearn.covariance import LedoitWolf
+                lw = LedoitWolf()
+                lw.fit(regime_returns.values)
+                Sigma_daily = lw.covariance_
+                print(f"  Using Ledoit‑Wolf shrinkage for regime {regime} covariance.")
+            except (ImportError, Exception):
+                # Fallback to sample covariance with ridge if needed
+                Sigma_daily = regime_returns.cov().values
+                # Add small ridge if not positive definite
+                try:
+                    np.linalg.cholesky(Sigma_daily)
+                except np.linalg.LinAlgError:
+                    Sigma_daily = Sigma_daily + np.eye(len(mu)) * 1e-6
         else:
             Sigma_daily = regime_returns.cov().values
-        Sigma = Sigma_daily * 252
+            # Add small ridge if not positive definite
+            try:
+                np.linalg.cholesky(Sigma_daily)
+            except np.linalg.LinAlgError:
+                Sigma_daily = Sigma_daily + np.eye(len(mu)) * 1e-6
 
-        # Ensure positive definiteness (additional safety)
-        try:
-            np.linalg.cholesky(Sigma)
-        except np.linalg.LinAlgError:
-            Sigma = Sigma + np.eye(len(mu)) * 1e-6
+        Sigma = Sigma_daily * 252
 
         # Risk-free rate
         r = regime_data['rf'].mean() * 252 if 'rf' in regime_data.columns else 0.02
 
-        # Replace NaNs/Infs
         mu = np.nan_to_num(mu, nan=0.0)
         Sigma = np.nan_to_num(Sigma, nan=0.0)
 
