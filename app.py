@@ -63,12 +63,45 @@ def format_weights(weights: dict, top_n: int = 10) -> pd.DataFrame:
     df["Weight (%)"] = df["Weight (%)"].map("{:.2f}%".format)
     return df.head(top_n)
 
-def add_bar_chart(df, column="Weight", max_weight=1.0):
-    """Add a simple horizontal bar chart using Streamlit's progress bar."""
-    for _, row in df.iterrows():
-        pct = row[column] / max_weight * 100
-        st.markdown(f"**{row['ETF']}**")
-        st.progress(pct / 100, text=f"{row['Weight (%)']}")
+def display_calibration_details(signal: dict, module_name: str):
+    """Show calibration and regime details in a clean format."""
+    if not signal:
+        return
+
+    st.markdown("#### 📐 Calibration Parameters")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Selected ETF", signal.get("selected_etf", "N/A"))
+        st.metric("Expected Annual Return", f"{signal.get('expected_return_annualized', 0)*100:.1f}%")
+        st.metric("Investment Horizon", f"{signal.get('horizon_days', 'N/A')} days")
+    with col2:
+        st.metric("Window Type", signal.get("window_type", "N/A").replace("_", " ").title())
+        st.metric("Regime Threshold", f"{signal.get('regime_threshold', 0):.2f}")
+        st.metric("Current Regime", signal.get("regime", "N/A").replace("-", " ").title())
+
+    st.markdown("---")
+    st.markdown("#### ⏱️ Semi‑Markov Transition Parameters")
+    sm = signal.get("semi_markov_params", {})
+    if sm:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Risk‑on → Risk‑off (p_01)", f"{sm.get('p_01', 0):.4f}")
+            st.metric("Mean Duration – Risk‑on", f"{sm.get('mean_duration_on', 0):.0f} days")
+        with col2:
+            st.metric("Risk‑off → Risk‑on (p_10)", f"{sm.get('p_10', 0):.4f}")
+            st.metric("Mean Duration – Risk‑off", f"{sm.get('mean_duration_off', 0):.0f} days")
+
+        # Show a preview of duration lists if they exist and are not too large
+        on_durs = sm.get("risk_on_durations", [])
+        off_durs = sm.get("risk_off_durations", [])
+        if on_durs or off_durs:
+            with st.expander("📜 Regime Duration History (Preview)"):
+                if on_durs:
+                    st.write("**Risk‑on durations (days):**", on_durs[:10], "..." if len(on_durs) > 10 else "")
+                if off_durs:
+                    st.write("**Risk‑off durations (days):**", off_durs[:10], "..." if len(off_durs) > 10 else "")
+    else:
+        st.info("No semi‑Markov parameters available.")
 
 # ----------------------------------------------------------------------
 # Sidebar – Debug Info & Last Update
@@ -153,7 +186,6 @@ if equity_signal:
     if weights:
         st.subheader("Portfolio Weights")
         df_weights = format_weights(weights, top_n=10)
-        # Show as a bar chart using columns for better presentation
         col_left, col_right = st.columns([1, 1])
         with col_left:
             st.dataframe(df_weights[["ETF", "Weight (%)"]], use_container_width=True)
@@ -166,18 +198,10 @@ if equity_signal:
     else:
         st.info("No weights available.")
 
-    # Details expander
+    # Details expander – now clean and professional
     with st.expander("🔍 Model Details & Parameters"):
-        st.markdown("#### Calibration & Regime Information")
-        st.json({
-            "selected_etf": equity_signal.get("selected_etf"),
-            "expected_return_annualized": equity_signal.get("expected_return_annualized"),
-            "horizon_days": equity_signal.get("horizon_days"),
-            "window_type": equity_signal.get("window_type"),
-            "regime_threshold": equity_signal.get("regime_threshold"),
-            "semi_markov_params": equity_signal.get("semi_markov_params", {})
-        })
-        st.markdown("#### Full Weights (All Assets)")
+        display_calibration_details(equity_signal, "equity")
+        st.markdown("#### 📊 Full Weight Vector (All Assets)")
         all_weights = equity_signal.get("weights", {})
         if all_weights:
             df_all = pd.DataFrame(list(all_weights.items()), columns=["ETF", "Weight"])
@@ -185,6 +209,8 @@ if equity_signal:
             df_all["Weight (%)"] = df_all["Weight"] * 100
             df_all["Weight (%)"] = df_all["Weight (%)"].map("{:.2f}%".format)
             st.dataframe(df_all[["ETF", "Weight (%)"]], use_container_width=True)
+        else:
+            st.info("No weights available.")
 
 else:
     st.error("📁 Signal file not found: `signals/equity_signal.json`")
@@ -233,16 +259,8 @@ if fi_signal:
                 st.progress(pct / 100, text=f"{row['Weight (%)']}")
 
     with st.expander("🔍 Model Details & Parameters"):
-        st.markdown("#### Calibration & Regime Information")
-        st.json({
-            "selected_etf": fi_signal.get("selected_etf"),
-            "expected_return_annualized": fi_signal.get("expected_return_annualized"),
-            "horizon_days": fi_signal.get("horizon_days"),
-            "window_type": fi_signal.get("window_type"),
-            "regime_threshold": fi_signal.get("regime_threshold"),
-            "semi_markov_params": fi_signal.get("semi_markov_params", {})
-        })
-        st.markdown("#### Full Weights (All Assets)")
+        display_calibration_details(fi_signal, "fi")
+        st.markdown("#### 📊 Full Weight Vector (All Assets)")
         all_weights = fi_signal.get("weights", {})
         if all_weights:
             df_all = pd.DataFrame(list(all_weights.items()), columns=["ETF", "Weight"])
@@ -250,6 +268,8 @@ if fi_signal:
             df_all["Weight (%)"] = df_all["Weight"] * 100
             df_all["Weight (%)"] = df_all["Weight (%)"].map("{:.2f}%".format)
             st.dataframe(df_all[["ETF", "Weight (%)"]], use_container_width=True)
+        else:
+            st.info("No weights available.")
 
 else:
     st.error("📁 Signal file not found: `signals/fi_signal.json`")
