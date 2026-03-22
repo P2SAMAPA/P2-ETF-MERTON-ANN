@@ -91,15 +91,23 @@ def display_calibration_details(signal: dict, module_name: str):
             st.metric("Risk‑off → Risk‑on (p_10)", f"{sm.get('p_10', 0):.4f}")
             st.metric("Mean Duration – Risk‑off", f"{sm.get('mean_duration_off', 0):.0f} days")
 
-        # Show a preview of duration lists if they exist and are not too large
         on_durs = sm.get("risk_on_durations", [])
         off_durs = sm.get("risk_off_durations", [])
+
         if on_durs or off_durs:
-            with st.expander("📜 Regime Duration History (Preview)"):
+            with st.expander("📜 Regime Duration History"):
                 if on_durs:
-                    st.write("**Risk‑on durations (days):**", on_durs[:10], "..." if len(on_durs) > 10 else "")
+                    st.markdown(f"**Risk‑on durations (days) — {len(on_durs)} periods**")
+                    bullet_list = "\n".join([f"- {d}" for d in on_durs[:10]])
+                    st.markdown(bullet_list)
+                    if len(on_durs) > 10:
+                        st.caption(f"... and {len(on_durs) - 10} more periods")
                 if off_durs:
-                    st.write("**Risk‑off durations (days):**", off_durs[:10], "..." if len(off_durs) > 10 else "")
+                    st.markdown(f"**Risk‑off durations (days) — {len(off_durs)} periods**")
+                    bullet_list = "\n".join([f"- {d}" for d in off_durs[:10]])
+                    st.markdown(bullet_list)
+                    if len(off_durs) > 10:
+                        st.caption(f"... and {len(off_durs) - 10} more periods")
     else:
         st.info("No semi‑Markov parameters available.")
 
@@ -124,7 +132,6 @@ with st.sidebar:
     equity_signal = signals["equity"]
     fi_signal = signals["fi"]
 
-    # Last update timestamp (from equity signal if available)
     if equity_signal:
         last_date = equity_signal.get("date", "unknown")
         st.markdown(f"**Last update:** {last_date}")
@@ -181,7 +188,6 @@ if equity_signal:
             value=f"{equity_signal.get('horizon_days', 'N/A')} days"
         )
 
-    # Portfolio weights (top 10)
     weights = equity_signal.get("weights", {})
     if weights:
         st.subheader("Portfolio Weights")
@@ -190,7 +196,6 @@ if equity_signal:
         with col_left:
             st.dataframe(df_weights[["ETF", "Weight (%)"]], use_container_width=True)
         with col_right:
-            # Horizontal bar chart using progress bars
             for _, row in df_weights.iterrows():
                 pct = row["Weight"] * 100
                 st.markdown(f"**{row['ETF']}**")
@@ -198,7 +203,6 @@ if equity_signal:
     else:
         st.info("No weights available.")
 
-    # Details expander – now clean and professional
     with st.expander("🔍 Model Details & Parameters"):
         display_calibration_details(equity_signal, "equity")
         st.markdown("#### 📊 Full Weight Vector (All Assets)")
