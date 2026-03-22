@@ -47,7 +47,6 @@ FI_ETFS = [
     "HYG",   # High Yield Corporate
     "MBB",   # Mortgage-Backed Securities
     "PFF",   # Preferred Stock
-    "TIP",   # TIPS (inflation-linked)
     "GLD",   # Gold
     "SLV",   # Silver
     "VNQ",   # REITs
