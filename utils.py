@@ -47,6 +47,11 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         prices = pd.read_parquet(prices_path)
         print(f"✓ Loaded prices: {prices.shape}")
 
+        # Ensure index is datetime
+        if not isinstance(prices.index, pd.DatetimeIndex):
+            prices.index = pd.to_datetime(prices.index)
+            print("  Converted index to datetime")
+
         try:
             fred_path = hf_hub_download(
                 repo_id=HF_DATASET_REPO,
@@ -58,6 +63,8 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
             )
             fred_df = pd.read_parquet(fred_path)
             print(f"✓ Loaded FRED data: {fred_df.shape}")
+            if not isinstance(fred_df.index, pd.DatetimeIndex):
+                fred_df.index = pd.to_datetime(fred_df.index)
         except Exception as e:
             print(f"⚠ FRED data not available: {e}")
             fred_df = pd.DataFrame()
@@ -82,6 +89,9 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
     print(f"{'='*60}")
     print(f"Repo: {HF_DATASET_REPO}")
     print(f"Token available: {'Yes (len=%d)' % len(HF_TOKEN) if HF_TOKEN else 'No'}")
+
+    if not HF_TOKEN:
+        raise ValueError("HF_TOKEN is empty or not set. Cannot upload.")
 
     if not signal or 'error' in signal:
         print(f"✗ ERROR: Signal for {module} failed - not saving to HF")
@@ -113,34 +123,28 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
         )
         print(f"✓ Successfully uploaded: {path_in_repo}")
 
-        # --- History handling with explicit check ---
+        # History handling
         history_file = f"/tmp/{module}_history{suffix}.json"
         history = []
         remote_history_path = f"signals/{module}_history{suffix}.json"
 
         # Try to download existing history
         try:
-            # First check if the file exists remotely by listing files
-            api = HfApi(token=HF_TOKEN)
-            try:
-                # This will raise if file not found, but we just try download directly
-                existing_path = hf_hub_download(
-                    repo_id=HF_DATASET_REPO,
-                    filename=remote_history_path,
-                    repo_type="dataset",
-                    token=HF_TOKEN,
-                    local_dir="/tmp",
-                    local_dir_use_symlinks=False,
-                    force_download=True  # ensure we get the latest
-                )
-                with open(existing_path, 'r') as f:
-                    history = json.load(f)
-                print(f"✓ Loaded existing history: {len(history)} records")
-            except Exception as download_err:
-                print(f"ℹ No existing history found (or download failed): {download_err}")
-                history = []
+            print(f"Attempting to download existing history from {remote_history_path}...")
+            existing_path = hf_hub_download(
+                repo_id=HF_DATASET_REPO,
+                filename=remote_history_path,
+                repo_type="dataset",
+                token=HF_TOKEN,
+                local_dir="/tmp",
+                local_dir_use_symlinks=False,
+                force_download=True
+            )
+            with open(existing_path, 'r') as f:
+                history = json.load(f)
+            print(f"✓ Loaded existing history: {len(history)} records")
         except Exception as e:
-            print(f"ℹ Could not retrieve remote history: {e}")
+            print(f"ℹ No existing history found or download failed: {e}")
             history = []
 
         # Append new record if not already present
@@ -155,10 +159,9 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
             "expected_return_annualized": signal.get("expected_return_annualized"),
             "generated_at": datetime.utcnow().isoformat()
         }
-        # Remove any None values for cleaner JSON
+        # Remove None values for cleaner JSON
         new_record = {k: v for k, v in new_record.items() if v is not None}
 
-        # Avoid duplicate based on date
         existing_dates = {r.get("date") for r in history if "date" in r}
         if new_record["date"] not in existing_dates:
             history.append(new_record)
@@ -166,11 +169,12 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
         else:
             print(f"ℹ Record for {new_record['date']} already exists – skipping append")
 
-        # Save updated history locally
+        # Write updated history locally
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2, default=str)
 
-        # Upload updated history
+        # Upload history
+        print(f"Uploading updated history to {remote_history_path}...")
         api.upload_file(
             path_or_fileobj=history_file,
             path_in_repo=remote_history_path,
@@ -186,7 +190,7 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
         print(f"✗ ERROR saving to HF: {e}")
         print(f"Traceback: {traceback.format_exc()}")
         print(f"{'='*60}\n")
-        raise
+        raise   # re-raise to make the step fail
 
 # ----------------------------------------------------------------------
 # Macro preprocessing (for Option B)
@@ -263,7 +267,7 @@ def process_module(
     rf_series = get_risk_free_rate_from_fred(fred_df)
 
     # Calibration (both windows)
-    current_date = prices.index[-1]
+    current_date = prices.index[-1]  # already a Timestamp
     calibration_results = calibrate_both_windows(
         prices, etfs, regime_analysis["regime_history"], rf_series, current_date
     )
