@@ -47,10 +47,14 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         prices = pd.read_parquet(prices_path)
         print(f"✓ Loaded prices: {prices.shape}")
 
-        # Ensure index is datetime
+        # --- Ensure index is datetime (handle if date is a column) ---
+        if "date" in prices.columns:
+            prices = prices.set_index("date")
+        elif "Date" in prices.columns:
+            prices = prices.set_index("Date")
         if not isinstance(prices.index, pd.DatetimeIndex):
             prices.index = pd.to_datetime(prices.index)
-            print("  Converted index to datetime")
+        print(f"  Index: {prices.index[0].date()} → {prices.index[-1].date()}")
 
         try:
             fred_path = hf_hub_download(
@@ -63,6 +67,11 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
             )
             fred_df = pd.read_parquet(fred_path)
             print(f"✓ Loaded FRED data: {fred_df.shape}")
+            # Fix FRED index similarly
+            if "date" in fred_df.columns:
+                fred_df = fred_df.set_index("date")
+            elif "Date" in fred_df.columns:
+                fred_df = fred_df.set_index("Date")
             if not isinstance(fred_df.index, pd.DatetimeIndex):
                 fred_df.index = pd.to_datetime(fred_df.index)
         except Exception as e:
@@ -267,7 +276,7 @@ def process_module(
     rf_series = get_risk_free_rate_from_fred(fred_df)
 
     # Calibration (both windows)
-    current_date = prices.index[-1]  # already a Timestamp
+    current_date = prices.index[-1]  # now a proper Timestamp
     calibration_results = calibrate_both_windows(
         prices, etfs, regime_analysis["regime_history"], rf_series, current_date
     )
