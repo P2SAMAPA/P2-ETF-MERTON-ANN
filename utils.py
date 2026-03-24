@@ -113,34 +113,70 @@ def save_signal_to_hf(signal: Dict, module: str, option: str = "A"):
         )
         print(f"✓ Successfully uploaded: {path_in_repo}")
 
-        # History
+        # --- History handling with explicit check ---
         history_file = f"/tmp/{module}_history{suffix}.json"
         history = []
+        remote_history_path = f"signals/{module}_history{suffix}.json"
+
+        # Try to download existing history
         try:
-            existing_path = hf_hub_download(
-                repo_id=HF_DATASET_REPO,
-                filename=f"signals/{module}_history{suffix}.json",
-                token=HF_TOKEN,
-                local_dir="/tmp",
-                local_dir_use_symlinks=False
-            )
-            with open(existing_path, 'r') as f:
-                history = json.load(f)
-            print(f"✓ Loaded existing history: {len(history)} records")
-        except Exception:
-            print(f"ℹ No existing history (OK for first run)")
+            # First check if the file exists remotely by listing files
+            api = HfApi(token=HF_TOKEN)
+            try:
+                # This will raise if file not found, but we just try download directly
+                existing_path = hf_hub_download(
+                    repo_id=HF_DATASET_REPO,
+                    filename=remote_history_path,
+                    repo_type="dataset",
+                    token=HF_TOKEN,
+                    local_dir="/tmp",
+                    local_dir_use_symlinks=False,
+                    force_download=True  # ensure we get the latest
+                )
+                with open(existing_path, 'r') as f:
+                    history = json.load(f)
+                print(f"✓ Loaded existing history: {len(history)} records")
+            except Exception as download_err:
+                print(f"ℹ No existing history found (or download failed): {download_err}")
+                history = []
+        except Exception as e:
+            print(f"ℹ Could not retrieve remote history: {e}")
+            history = []
 
-        history.append(signal)
+        # Append new record if not already present
+        new_record = {
+            "date": signal.get("date"),
+            "next_trading_date": signal.get("next_trading_date"),
+            "selected_etf": signal.get("selected_etf"),
+            "weights": signal.get("weights"),
+            "regime": signal.get("regime"),
+            "horizon_days": signal.get("horizon_days"),
+            "window_type": signal.get("window_type"),
+            "expected_return_annualized": signal.get("expected_return_annualized"),
+            "generated_at": datetime.utcnow().isoformat()
+        }
+        # Remove any None values for cleaner JSON
+        new_record = {k: v for k, v in new_record.items() if v is not None}
 
+        # Avoid duplicate based on date
+        existing_dates = {r.get("date") for r in history if "date" in r}
+        if new_record["date"] not in existing_dates:
+            history.append(new_record)
+            print(f"✓ Appended new record for {new_record['date']}")
+        else:
+            print(f"ℹ Record for {new_record['date']} already exists – skipping append")
+
+        # Save updated history locally
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2, default=str)
 
+        # Upload updated history
         api.upload_file(
             path_or_fileobj=history_file,
-            path_in_repo=f"signals/{module}_history{suffix}.json",
+            path_in_repo=remote_history_path,
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
-            commit_message=f"Update {module} history (Option {option})"
+            commit_message=f"Update {module} history (Option {option}) – {len(history)} records"
         )
         print(f"✓ Updated history: {len(history)} total records")
 
