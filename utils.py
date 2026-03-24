@@ -411,9 +411,10 @@ def process_module(
 
     # Add metadata
     next_trading_date = get_next_trading_date(current_date)
+    next_trading_date_str = next_trading_date.strftime("%Y-%m-%d")  # ensure string
     signal = {
         "date": current_date.strftime("%Y-%m-%d"),
-        "next_trading_date": next_trading_date.strftime("%Y-%m-%d"),
+        "next_trading_date": next_trading_date_str,
         "module": module,
         **best_result,
         "all_horizons_tested": horizons,
