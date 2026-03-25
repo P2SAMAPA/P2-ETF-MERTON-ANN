@@ -7,9 +7,10 @@ import streamlit as st
 import pandas as pd
 import json
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from huggingface_hub import hf_hub_download
+import pandas_market_calendars as mcal
 
 # Config
 try:
@@ -24,10 +25,26 @@ except:
 
 st.set_page_config(page_title="P2 ETF Merton ANN", page_icon="📊", layout="wide")
 
-# Helper functions
-@st.cache_data(ttl=3600)  # cache for 1 hour
+# ── NYSE calendar helper ─────────────────────────────────────────────────────
+nyse = mcal.get_calendar("NYSE")
+
+def next_trading_day(date: pd.Timestamp) -> pd.Timestamp:
+    """Return the next NYSE trading day after the given date."""
+    schedule = nyse.schedule(start_date=date, end_date=date + timedelta(days=10))
+    trading_days = schedule.index
+    next_days = trading_days[trading_days > date]
+    if len(next_days) > 0:
+        return next_days[0]
+    # fallback: skip weekends only
+    d = date + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+# ── Helper functions ─────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
 def load_prices(module: str):
-    """Load the latest price data for a module (used to compute actual returns)."""
+    """Load the latest price data for a module (used to compute actual returns and date)."""
     try:
         filename = f"data/{module}.parquet"
         path = hf_hub_download(
@@ -38,6 +55,13 @@ def load_prices(module: str):
             local_dir="/tmp"
         )
         df = pd.read_parquet(path)
+        # Ensure index is datetime
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'Date' in df.columns:
+                df = df.set_index('Date')
+            elif 'date' in df.columns:
+                df = df.set_index('date')
+            df.index = pd.to_datetime(df.index)
         # Extract close prices for all ETFs (assume column pattern *Close)
         close_cols = [c for c in df.columns if c.endswith("_Close")]
         close_df = df[close_cols].copy()
@@ -69,25 +93,16 @@ def load_history(module: str, option: str = "A"):
         return []
 
 def annual_to_daily(annual_return):
-    """Convert annualized return to daily return (simple)."""
     if annual_return is None or np.isnan(annual_return):
         return None
     return (1 + annual_return) ** (1/252) - 1
 
 def compute_actual_return(row, price_df):
-    """
-    Compute actual daily return for a given signal row.
-    row: dict with keys 'date', 'next_trading_date', 'selected_etf'
-    price_df: DataFrame with index as date, columns = ETF tickers.
-    """
     signal_date = pd.to_datetime(row['date'])
     next_date = pd.to_datetime(row['next_trading_date'])
     etf = row['selected_etf']
-
     if etf not in price_df.columns:
         return None
-
-    # Get close prices
     try:
         close_signal = price_df.loc[signal_date, etf]
         close_next = price_df.loc[next_date, etf]
@@ -96,20 +111,13 @@ def compute_actual_return(row, price_df):
         return None
 
 def format_history_with_returns(history, price_df, module):
-    """Add daily expected and actual return columns to history DataFrame."""
     if not history:
         return pd.DataFrame()
-
     df = pd.DataFrame(history)
-    # Keep only relevant columns
     cols = ['date', 'next_trading_date', 'selected_etf', 'expected_return_annualized', 'regime', 'horizon_days', 'window_type']
     df = df[[c for c in cols if c in df.columns]].copy()
-
-    # Convert expected annual to daily
     df['expected_daily_return'] = df['expected_return_annualized'].apply(annual_to_daily)
     df['expected_daily_return_pct'] = df['expected_daily_return'] * 100
-
-    # Compute actual daily return using price data
     if price_df is not None:
         actual_returns = []
         for _, row in df.iterrows():
@@ -117,19 +125,14 @@ def format_history_with_returns(history, price_df, module):
             actual_returns.append(ret)
         df['actual_daily_return'] = actual_returns
         df['actual_daily_return_pct'] = df['actual_daily_return'] * 100
-        # Format as string with %
         df['actual_daily_return_pct'] = df['actual_daily_return_pct'].apply(
             lambda x: f"{x:.2f}%" if pd.notna(x) else "Pending"
         )
     else:
         df['actual_daily_return_pct'] = "N/A"
-
-    # Format expected daily as percentage
     df['expected_daily_return_pct'] = df['expected_daily_return_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
     df['expected_return_annualized'] = df['expected_return_annualized'] * 100
     df['expected_return_annualized'] = df['expected_return_annualized'].map("{:.2f}%".format)
-
-    # Rename columns for display
     df = df.rename(columns={
         'date': 'Date',
         'selected_etf': 'ETF',
@@ -140,11 +143,10 @@ def format_history_with_returns(history, price_df, module):
         'horizon_days': 'Horizon (days)',
         'window_type': 'Window'
     })
-    # Reorder columns
     ordered = ['Date', 'ETF', 'Exp. Annual Return', 'Exp. Daily Return', 'Actual Daily Return', 'Regime', 'Horizon (days)', 'Window']
     return df[ordered]
 
-# Sidebar
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🔧 System Info")
     st.markdown(f"**Repo:** `{HF_DATASET_REPO}`")
@@ -153,10 +155,8 @@ with st.sidebar:
     option = st.radio("Select Model Option", ["A", "B"], index=0, help="Option A: baseline (no macro). Option B: macro features + ensemble.")
     st.markdown("---")
 
-    # Load signals for selected option
+    # Load signals for selected option (to display sidebar last update)
     equity_signal = load_signal("equity", option)
-    fi_signal = load_signal("fi", option)
-
     if equity_signal:
         last_date = equity_signal.get("date", "unknown")
         st.markdown(f"**Last update:** {last_date}")
@@ -166,18 +166,26 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Data from HuggingFace Hub • Model: Merton ANN • Regime: Semi-Markov")
 
-# Main page
+# ── Load price data to compute correct next trading day ─────────────────────
+price_eq = load_prices("equity")
+price_fi = load_prices("fixed_income")
+
+# Compute the next trading day from the latest date in equity data (same for both)
+if price_eq is not None and not price_eq.empty:
+    last_data_date = price_eq.index[-1]
+    computed_next_date = next_trading_day(last_data_date).strftime("%Y-%m-%d")
+else:
+    computed_next_date = "N/A"
+
+# ── Main page ────────────────────────────────────────────────────────────────
 st.title("📈 P2 ETF Merton ANN")
 st.markdown("**Merton Optimal Portfolio with Semi-Markov Regime Switching and ANN Feedback Control**")
-if equity_signal:
-    next_trading = equity_signal.get("next_trading_date", "N/A")
-    st.markdown(f"### 🗓️ **Prediction for:** {next_trading} (US Markets) — Option {option}")
+st.markdown(f"### 🗓️ **Prediction for:** {computed_next_date} (US Markets) — Option {option}")
 
 # Tabs
 tab1, tab2 = st.tabs(["Current Signals", "Historical Performance"])
 
 with tab1:
-    # Equity module (same as before, unchanged)
     st.header("📊 Equity Universe")
     if equity_signal:
         col1, col2, col3, col4 = st.columns(4)
@@ -193,17 +201,15 @@ with tab1:
             df_weights = df_weights.sort_values("Weight", ascending=False).reset_index(drop=True)
             df_weights["Weight (%)"] = df_weights["Weight"] * 100
             df_weights["Weight (%)"] = df_weights["Weight (%)"].map("{:.2f}%".format)
-            # Display as large table
             st.markdown("<div style='font-size: 18px'>" + df_weights[["ETF", "Weight (%)"]].head(10).to_html(escape=False, index=False) + "</div>", unsafe_allow_html=True)
 
         with st.expander("🔍 Model Details & Parameters"):
-            # ... (same as before, keep for brevity)
             st.json(equity_signal.get("semi_markov_params", {}))
     else:
         st.error("No equity signal available for this option.")
 
-    # Fixed Income module (unchanged)
     st.header("📊 Fixed Income & Real Assets")
+    fi_signal = load_signal("fi", option)
     if fi_signal:
         col1, col2, col3, col4 = st.columns(4)
         with col1: st.metric("Selected ETF", fi_signal.get("selected_etf", "N/A"))
@@ -228,7 +234,7 @@ with tab1:
 with tab2:
     st.header("Historical Signals")
 
-    # Load price data for computing actual returns
+    # Load price data for actual returns
     price_eq = load_prices("equity")
     price_fi = load_prices("fixed_income")
 
