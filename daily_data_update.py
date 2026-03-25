@@ -5,135 +5,42 @@ Also updates FRED macro data.
 
 import os
 import sys
-import pandas as pd
-import yfinance as yf
-from datetime import datetime, timedelta
-from huggingface_hub import HfApi, hf_hub_download, upload_file
-from fredapi import Fred
 import logging
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from huggingface_hub import HfApi
 
 import config as cfg
+import data_utils as du
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------------------
-# Helper: fetch FRED data (full history, then forward fill)
-# ------------------------------------------------------------------------------
-def fetch_fred_data(api_key, series_list, start_date="2000-01-01", end_date=None):
-    """Fetch FRED series and return a daily DataFrame with forward fill."""
-    fred = Fred(api_key=api_key)
-    data = {}
-    for series in series_list:
-        try:
-            df = fred.get_series(series, start=start_date, end=end_date)
-            data[series] = df
-            log.debug(f"  FRED {series}: {len(df)} points")
-        except Exception as e:
-            log.warning(f"Failed to fetch {series}: {e}")
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
-    df.index = pd.to_datetime(df.index)
-    df = df.resample('D').ffill()
-    return df
 
 # ------------------------------------------------------------------------------
-# Helper: fetch ETF prices for a single date (or last available)
+# Helper: get next trading day (using data_utils)
 # ------------------------------------------------------------------------------
-def fetch_prices_for_date(tickers, target_date):
-    """
-    Download OHLCV for a list of tickers for a specific target_date.
-    Returns a dictionary with keys like {ticker}_Close etc.
-    If data for target_date is not available, returns None.
-    """
-    start = target_date - timedelta(days=5)
-    end = target_date + timedelta(days=1)
-    try:
-        raw = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)
-        if raw.empty:
-            log.warning(f"No data returned for {tickers} around {target_date}")
-            return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            flat = pd.DataFrame()
-            for ticker in tickers:
-                for col in cfg.OHLCV_COLS:
-                    if (col, ticker) in raw.columns:
-                        flat[f"{ticker}_{col}"] = raw[(col, ticker)]
-                    else:
-                        flat[f"{ticker}_{col}"] = pd.NA
-            flat.index = raw.index
-        else:
-            flat = raw.copy()
-            for col in cfg.OHLCV_COLS:
-                flat.rename(columns={col: f"{tickers[0]}_{col}"}, inplace=True)
-        available_dates = flat.index[flat.index <= target_date]
-        if len(available_dates) == 0:
-            log.warning(f"No data on or before {target_date} for {tickers}")
-            return None
-        latest = available_dates[-1]
-        row = flat.loc[latest].to_dict()
-        row['date'] = latest
-        return row
-    except Exception as e:
-        log.error(f"Error fetching prices for {tickers}: {e}")
-        return None
-
-# ------------------------------------------------------------------------------
-# Helper: append a new row to a parquet dataset and upload it
-# ------------------------------------------------------------------------------
-def update_parquet_file(dataset_file, new_row_dict, repo_id, token):
-    """
-    dataset_file: path in repo, e.g., "data/equity.parquet"
-    new_row_dict: dict containing the new row (must include 'date' key)
-    Returns True on success.
-    """
-    local_path = f"/tmp/{dataset_file.replace('/', '_')}"
-    try:
-        downloaded_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=dataset_file,
-            repo_type="dataset",
-            token=token,
-            local_dir="/tmp",
-            local_dir_use_symlinks=False,
-        )
-        log.info(f"Downloaded {dataset_file} to {downloaded_path}")
-        df = pd.read_parquet(downloaded_path)
-    except Exception as e:
-        log.warning(f"Could not download {dataset_file}: {e}. Assuming empty dataset.")
-        df = pd.DataFrame()
-
-    new_date = new_row_dict['date']
-    if not df.empty and 'date' in df.columns:
-        if new_date in pd.to_datetime(df['date']).values:
-            log.info(f"Date {new_date} already exists in {dataset_file}. Skipping append.")
-            return True
-    else:
-        if 'date' not in df.columns and not df.empty:
-            log.warning(f"{dataset_file} missing date column, re-indexing.")
-            df = df.reset_index().rename(columns={'index': 'date'})
-
-    new_row_df = pd.DataFrame([new_row_dict])
-    updated_df = pd.concat([df, new_row_df], ignore_index=True)
-    updated_df = updated_df.sort_values('date').reset_index(drop=True)
-
-    tmp_out = f"/tmp/updated_{dataset_file.replace('/', '_')}"
-    updated_df.to_parquet(tmp_out, index=False)
-    upload_file(
-        path_or_fileobj=tmp_out,
-        path_in_repo=dataset_file,
-        repo_id=repo_id,
-        repo_type="dataset",
-        token=token,
-        commit_message=f"Daily update: added {new_date.strftime('%Y-%m-%d')}"
+def next_trading_day(date: pd.Timestamp) -> pd.Timestamp:
+    """Return the next NYSE trading day after the given date."""
+    # Use the same calendar as seed.py
+    trading_days = du.get_trading_days(
+        start=date.strftime("%Y-%m-%d"),
+        end=(date + timedelta(days=10)).strftime("%Y-%m-%d")
     )
-    log.info(f"Uploaded updated {dataset_file} with new date {new_date}")
-    return True
+    next_days = trading_days[trading_days > date]
+    if len(next_days) > 0:
+        return next_days[0]
+    # fallback: skip weekends only
+    d = date + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
 
 # ------------------------------------------------------------------------------
-# Main
+# Main update
 # ------------------------------------------------------------------------------
 def main():
     log.info("Daily data update started.")
@@ -145,68 +52,121 @@ def main():
         log.error("FRED_API_KEY not set")
         sys.exit(1)
 
-    today = pd.Timestamp.now().normalize()
-    target_date = today - timedelta(days=1)
+    # --------------------------------------------------------------------------
+    # 1. Load current OHLCV file to get last date
+    # --------------------------------------------------------------------------
+    try:
+        ohlcv_existing = du.load_parquet(cfg.FILE_ETF_OHLCV)
+        if ohlcv_existing.empty:
+            log.error("No existing OHLCV data – run seed.py first.")
+            sys.exit(1)
+        last_date = ohlcv_existing.index[-1]
+        log.info(f"Last stored OHLCV date: {last_date.date()}")
+    except Exception as e:
+        log.error(f"Failed to load existing OHLCV: {e}")
+        sys.exit(1)
 
     # --------------------------------------------------------------------------
-    # 1. Update equity dataset
+    # 2. Determine target date (next trading day after last_date)
     # --------------------------------------------------------------------------
-    log.info("Updating equity module...")
-    equity_tickers = cfg.EQUITY_ETFS + [cfg.EQUITY_BENCHMARK, cfg.EQUITY_REGIME]
-    equity_row = fetch_prices_for_date(equity_tickers, target_date)
-    if equity_row is None:
-        log.warning("No equity data fetched. Skipping equity update.")
+    target_date = next_trading_day(last_date)
+    if target_date.date() > datetime.now().date():
+        log.info("Next trading day is in the future – nothing to update.")
+        return
+    log.info(f"Update window: {target_date.date()} to {target_date.date()}")
+
+    # --------------------------------------------------------------------------
+    # 3. Fetch new OHLCV for the target date
+    # --------------------------------------------------------------------------
+    start = target_date.strftime("%Y-%m-%d")
+    end   = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    log.info(f"Fetching OHLCV for {target_date.date()} ...")
+    try:
+        ohlcv_multi = du.download_ohlcv(cfg.ALL_TICKERS, start=start, end=end)
+        if ohlcv_multi.empty:
+            log.error("No OHLCV data returned – skipping update.")
+            return
+        new_ohlcv_flat = du.flatten_ohlcv(ohlcv_multi)
+    except Exception as e:
+        log.error(f"OHLCV fetch failed: {e}")
+        sys.exit(1)
+
+    # --------------------------------------------------------------------------
+    # 4. Append to etf_ohlcv.parquet
+    # --------------------------------------------------------------------------
+    # Ensure columns match existing (new_ohlcv_flat may have fewer columns)
+    if not ohlcv_existing.empty:
+        new_ohlcv_flat = new_ohlcv_flat.reindex(ohlcv_existing.columns, fill_value=np.nan)
+    ohlcv_updated = pd.concat([ohlcv_existing, new_ohlcv_flat], axis=0).sort_index()
+    du.upload_parquet(ohlcv_updated, cfg.FILE_ETF_OHLCV,
+                      f"Daily update: added {target_date.date()}")
+
+    # --------------------------------------------------------------------------
+    # 5. Recompute etf_returns.parquet from the updated OHLCV
+    # --------------------------------------------------------------------------
+    returns = du.compute_returns(ohlcv_updated, cfg.ALL_TICKERS)
+    du.upload_parquet(returns, cfg.FILE_ETF_RETURNS,
+                      f"Daily update: recomputed returns to {target_date.date()}")
+
+    # --------------------------------------------------------------------------
+    # 6. Recompute etf_vol.parquet from the updated returns
+    # --------------------------------------------------------------------------
+    if not returns.empty:
+        vol = pd.DataFrame(index=returns.index)
+        for t in cfg.ALL_TICKERS:
+            ret_col = f"{t}_ret"
+            if ret_col in returns.columns:
+                vol[f"{t}_vol"] = returns[ret_col].rolling(cfg.VOL_WINDOW).std() * np.sqrt(252)
+        vol = vol.dropna(how="all")
+        du.upload_parquet(vol, cfg.FILE_ETF_VOL,
+                          f"Daily update: recomputed vol to {target_date.date()}")
     else:
-        update_parquet_file(
-            dataset_file="data/equity.parquet",
-            new_row_dict=equity_row,
-            repo_id=cfg.HF_DATASET_REPO,
-            token=cfg.HF_TOKEN,
-        )
+        log.warning("Returns empty – skipping volatility update.")
 
     # --------------------------------------------------------------------------
-    # 2. Update fixed income dataset
+    # 7. Fetch FRED macro data for the target date
     # --------------------------------------------------------------------------
-    log.info("Updating fixed income module...")
-    fi_tickers = cfg.FI_ETFS + [cfg.FI_BENCHMARK, cfg.FI_REGIME]
-    fi_row = fetch_prices_for_date(fi_tickers, target_date)
-    if fi_row is None:
-        log.warning("No fixed income data fetched. Skipping FI update.")
-    else:
-        update_parquet_file(
-            dataset_file="data/fixed_income.parquet",
-            new_row_dict=fi_row,
-            repo_id=cfg.HF_DATASET_REPO,
-            token=cfg.HF_TOKEN,
-        )
+    log.info(f"Fetching FRED data for {target_date.date()} ...")
+    try:
+        macro_new = du.download_fred(start=start, end=start)   # single day
+        if macro_new.empty:
+            log.warning("FRED data returned empty – using NaNs.")
+            macro_new = pd.DataFrame(index=[target_date], columns=cfg.FRED_SERIES.keys(), dtype=float)
+    except Exception as e:
+        log.error(f"FRED fetch failed: {e}")
+        sys.exit(1)
 
     # --------------------------------------------------------------------------
-    # 3. Update FRED macro dataset
+    # 8. Append to macro_fred.parquet
     # --------------------------------------------------------------------------
-    log.info("Updating FRED macro data...")
-    fred_series_list = list(cfg.FRED_SERIES.keys())
-    fred_df = fetch_fred_data(
-        cfg.FRED_API_KEY,
-        fred_series_list,
-        start_date=cfg.FRED_START,
-        end_date=today
+    macro_existing = du.load_parquet(cfg.FILE_MACRO_FRED)
+    if not macro_existing.empty:
+        macro_new = macro_new.reindex(macro_existing.columns, fill_value=np.nan)
+    macro_updated = pd.concat([macro_existing, macro_new], axis=0).sort_index()
+    du.upload_parquet(macro_updated, cfg.FILE_MACRO_FRED,
+                      f"Daily update: added macro for {target_date.date()}")
+
+    # --------------------------------------------------------------------------
+    # 9. Recompute macro_derived.parquet from the updated macro_fred
+    # --------------------------------------------------------------------------
+    macro_derived = du.compute_macro_derived(macro_updated)
+    du.upload_parquet(macro_derived, cfg.FILE_MACRO_DERIVED,
+                      f"Daily update: recomputed derived macro to {target_date.date()}")
+
+    # --------------------------------------------------------------------------
+    # 10. Rebuild master.parquet from all updated files
+    # --------------------------------------------------------------------------
+    master = du.build_master(
+        ohlcv_updated,
+        returns,
+        macro_updated,
+        macro_derived
     )
-    if not fred_df.empty:
-        tmp_fred = "/tmp/fred_macro.parquet"
-        fred_df.to_parquet(tmp_fred)
-        upload_file(
-            path_or_fileobj=tmp_fred,
-            path_in_repo="data/fred_macro.parquet",
-            repo_id=cfg.HF_DATASET_REPO,
-            repo_type="dataset",
-            token=cfg.HF_TOKEN,
-            commit_message=f"Update FRED macro data as of {today.strftime('%Y-%m-%d')}"
-        )
-        log.info("FRED macro data updated.")
-    else:
-        log.warning("No FRED data fetched. Skipping macro update.")
+    du.upload_parquet(master, cfg.FILE_MASTER,
+                      f"Daily update: rebuilt master to {target_date.date()}")
 
-    log.info("Daily data update finished.")
+    log.info("Daily update completed successfully.")
+
 
 if __name__ == "__main__":
     main()
