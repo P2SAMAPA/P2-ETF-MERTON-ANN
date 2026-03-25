@@ -52,7 +52,8 @@ def load_prices(module: str):
             filename=filename,
             repo_type="dataset",
             token=HF_TOKEN,
-            local_dir="/tmp"
+            local_dir="/tmp",
+            force_download=True,          # <-- added to ensure latest version
         )
         df = pd.read_parquet(path)
         # Ensure index is datetime
