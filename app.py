@@ -126,11 +126,27 @@ def format_history_with_returns(history, price_df, module):
             actual_returns.append(ret)
         df['actual_daily_return'] = actual_returns
         df['actual_daily_return_pct'] = df['actual_daily_return'] * 100
-        df['actual_daily_return_pct'] = df['actual_daily_return_pct'].apply(
-            lambda x: f"{x:.2f}%" if pd.notna(x) else "Pending"
-        )
+
+        # --- FIX: Safe formatting for actual daily returns ---
+        def safe_format(x):
+            # If x is array-like (list, Series), extract first element or use scalar
+            if isinstance(x, (list, np.ndarray, pd.Series)):
+                # For our case, we expect single values, but if multiple, take first
+                x = x[0] if len(x) > 0 else np.nan
+            # Handle scalar values
+            if pd.notna(x):
+                try:
+                    return f"{float(x):.2f}%"
+                except (TypeError, ValueError):
+                    return "Pending"
+            else:
+                return "Pending"
+
+        df['actual_daily_return_pct'] = df['actual_daily_return_pct'].apply(safe_format)
+        # ------------------------------------------------------
     else:
         df['actual_daily_return_pct'] = "N/A"
+
     df['expected_daily_return_pct'] = df['expected_daily_return_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
     df['expected_return_annualized'] = df['expected_return_annualized'] * 100
     df['expected_return_annualized'] = df['expected_return_annualized'].map("{:.2f}%".format)
