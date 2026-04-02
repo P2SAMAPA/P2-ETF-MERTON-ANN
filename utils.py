@@ -53,6 +53,14 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
             prices = prices.set_index("Date")
         if not isinstance(prices.index, pd.DatetimeIndex):
             prices.index = pd.to_datetime(prices.index)
+        
+        # CRITICAL FIX: Check and remove duplicate dates in index
+        if prices.index.duplicated().any():
+            n_dups = prices.index.duplicated().sum()
+            print(f"  ⚠ Found {n_dups} duplicate dates in prices, removing duplicates")
+            prices = prices[~prices.index.duplicated(keep='first')]
+            print(f"  ✓ After dedup: {prices.shape}")
+        
         print(f" Index: {prices.index[0].date()} → {prices.index[-1].date()}")
 
         try:
@@ -72,6 +80,13 @@ def load_data_from_hf(module: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 fred_df = fred_df.set_index("Date")
             if not isinstance(fred_df.index, pd.DatetimeIndex):
                 fred_df.index = pd.to_datetime(fred_df.index)
+            
+            # CRITICAL FIX: Check and remove duplicate dates in FRED data
+            if fred_df.index.duplicated().any():
+                n_dups = fred_df.index.duplicated().sum()
+                print(f"  ⚠ Found {n_dups} duplicate dates in FRED data, removing duplicates")
+                fred_df = fred_df[~fred_df.index.duplicated(keep='first')]
+                
         except Exception as e:
             print(f"⚠ FRED data not available: {e}")
             fred_df = pd.DataFrame()
@@ -168,6 +183,10 @@ def rolling_validation_score(
     
     # Simple heuristic: pick ETF with best Sharpe in recent window
     recent_returns = returns.iloc[-window:]
+    
+    # CRITICAL FIX: Remove duplicates from recent_returns
+    if recent_returns.index.duplicated().any():
+        recent_returns = recent_returns[~recent_returns.index.duplicated(keep='first')]
     
     # Calculate Sharpe for each ETF
     sharpe_scores = []
@@ -351,6 +370,11 @@ def preprocess_macro(fred_df: pd.DataFrame, returns_index: pd.DatetimeIndex) -> 
         return pd.DataFrame(index=returns_index)
 
     fred_df.index = pd.to_datetime(fred_df.index)
+    
+    # CRITICAL FIX: Remove duplicates from returns_index
+    if returns_index.duplicated().any():
+        returns_index = returns_index[~returns_index.duplicated(keep='first')]
+    
     macro_aligned = fred_df.reindex(returns_index, method='ffill').fillna(method='ffill')
 
     macro_z = macro_aligned.copy()
@@ -400,6 +424,11 @@ def process_module(
     if regime_prices is None:
         return {"error": f"Regime indicator {regime_ticker} not found"}
 
+    # CRITICAL FIX: Ensure regime_prices has no duplicates
+    if regime_prices.index.duplicated().any():
+        print(f"  ⚠ Found {regime_prices.index.duplicated().sum()} duplicates in regime_prices, removing")
+        regime_prices = regime_prices[~regime_prices.index.duplicated(keep='first')]
+
     # CHANGE #7: Calculate validation score first
     validation_score = rolling_validation_score(prices, etfs, pd.Series(), benchmark, window=252)
     print(f"  Validation: Sharpe dispersion = {validation_score.get('sharpe_dispersion', 0):.3f}")
@@ -408,6 +437,11 @@ def process_module(
     # Get benchmark returns for adaptive regime detection
     bench_col = f"{benchmark}_Close" if f"{benchmark}_Close" in prices.columns else benchmark
     benchmark_returns = prices[bench_col] if bench_col in prices.columns else pd.Series()
+    
+    # CRITICAL FIX: Remove duplicates from benchmark_returns
+    if benchmark_returns.index.duplicated().any():
+        print(f"  ⚠ Found {benchmark_returns.index.duplicated().sum()} duplicates in benchmark_returns, removing")
+        benchmark_returns = benchmark_returns[~benchmark_returns.index.duplicated(keep='first')]
 
     # CHANGE #2: Regime detection with adaptive window
     regime_analysis = full_regime_analysis(regime_prices, benchmark_returns, adaptive=True)
@@ -477,7 +511,7 @@ def process_module(
 
             try:
                 model = train_ann_for_horizon(
-                    training_data, len(ets), eta,
+                    training_data, len(etfs), eta,
                     epochs=epochs, learning_rate=learning_rate,
                     hidden_size=hidden_size, input_dim=training_data["X"].shape[1]
                 )
