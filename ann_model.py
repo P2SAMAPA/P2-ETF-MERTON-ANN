@@ -1,10 +1,5 @@
-"""
-ann_model.py — P2-ETF-MERTON-ANN
-Small MLP with variable input dimension.
-Includes: Top-2 selection with temperature, momentum overlay
-"""
-
 import numpy as np
+import pandas as pd
 from typing import Dict, Tuple, List
 
 class MertonANN:
@@ -160,57 +155,36 @@ def train_ann_for_horizon(
     return model
 
 
-# CHANGE #1: Top-2 selection with temperature
 def select_etfs_with_temperature(
     weights: np.ndarray, 
     temperature: float = 0.4, 
     max_etfs: int = 2,
     second_etf_threshold: float = 0.7
 ) -> Tuple[List[int], np.ndarray, float]:
-    """
-    Select top ETFs using softmax temperature.
-    
-    Args:
-        weights: Raw ANN weights (n_assets,)
-        temperature: Lower = more concentrated (0.3-0.6 recommended)
-        max_etfs: Maximum ETFs to select (1 or 2)
-        second_etf_threshold: Include 2nd ETF if its prob > threshold * top_prob
-    
-    Returns:
-        selected_indices: List of selected ETF indices (1 or 2)
-        allocation: Allocation weights (sum to 1)
-        confidence: max_prob - second_prob (for retraining trigger)
-    """
-    # Softmax with temperature
     exp_weights = np.exp(weights / temperature)
     probs = exp_weights / np.sum(exp_weights)
     
-    # Sort by probability
     sorted_idx = np.argsort(probs)[::-1]
     top1_idx = sorted_idx[0]
     top1_prob = probs[top1_idx]
     
-    # Check if we should include 2nd ETF
     if max_etfs >= 2 and len(probs) > 1:
         top2_idx = sorted_idx[1]
         top2_prob = probs[top2_idx]
         
-        # Include if second best is within threshold of best
         if top2_prob > second_etf_threshold * top1_prob:
             selected = [top1_idx, top2_idx]
             allocation = np.array([top1_prob, top2_prob])
-            allocation = allocation / np.sum(allocation)  # Normalize
+            allocation = allocation / np.sum(allocation)
             confidence = top1_prob - top2_prob
             return selected, allocation, confidence
     
-    # Single ETF
     selected = [top1_idx]
     allocation = np.array([1.0])
     confidence = top1_prob - (probs[sorted_idx[1]] if len(probs) > 1 else 0)
     return selected, allocation, confidence
 
 
-# CHANGE #3: Momentum overlay
 def apply_momentum_filter(
     ann_weights: np.ndarray, 
     prices: pd.DataFrame, 
@@ -218,30 +192,15 @@ def apply_momentum_filter(
     lookback: int = 20,
     momentum_boost: float = 0.3
 ) -> np.ndarray:
-    """
-    Adjust ANN weights based on 20-day momentum.
-    Boosts weights of ETFs with positive momentum, reduces negative momentum.
-    
-    Args:
-        ann_weights: Raw ANN output weights
-        prices: Price DataFrame with ETF columns
-        etfs: List of ETF tickers in order
-        lookback: Days for momentum calculation (default 20)
-        momentum_boost: How much to weight momentum (0.3 = 30% momentum, 70% ANN)
-    
-    Returns:
-        Adjusted weights
-    """
     if len(prices) < lookback + 1:
-        return ann_weights  # Not enough data
+        return ann_weights
     
-    # Calculate momentum for each ETF
     momentums = []
     for etf in etfs:
         col = f"{etf}_Close" if f"{etf}_Close" in prices.columns else etf
         if col in prices.columns:
             recent = prices[col].iloc[-lookback:].dropna()
-            if len(recent) >= lookback // 2:  # At least half the data
+            if len(recent) >= lookback // 2:
                 mom = (recent.iloc[-1] / recent.iloc[0] - 1)
             else:
                 mom = 0
@@ -251,22 +210,19 @@ def apply_momentum_filter(
     
     momentums = np.array(momentums)
     
-    # Normalize momentum to [0.5, 1.5] range for multiplicative adjustment
-    mom_min, mom_max = np.percentile(momentums, [10, 90])  # Robust to outliers
+    mom_min, mom_max = np.percentile(momentums, [10, 90])
     if mom_max > mom_min:
         mom_norm = 0.5 + (momentums - mom_min) / (mom_max - mom_min)
     else:
         mom_norm = np.ones_like(momentums)
     
-    # Blend ANN weights with momentum
     adjusted = ann_weights * (1 - momentum_boost + momentum_boost * mom_norm)
-    adjusted = np.maximum(adjusted, 0)  # No shorting
+    adjusted = np.maximum(adjusted, 0)
     
-    # Renormalize
     if np.sum(adjusted) > 0:
         adjusted = adjusted / np.sum(adjusted)
     else:
-        adjusted = ann_weights  # Fallback
+        adjusted = ann_weights
     
     return adjusted
 
@@ -282,15 +238,6 @@ def predict_optimal_etf(
     apply_momentum: bool = True,
     temperature: float = 0.4
 ) -> Tuple[List[int], np.ndarray, np.ndarray, float]:
-    """
-    Predict optimal ETF(s) with momentum overlay and temperature-based selection.
-    
-    Returns:
-        selected_indices: List of 1 or 2 ETF indices
-        allocation: Weight allocation (sum to 1)
-        raw_weights: Pre-momentum ANN weights
-        confidence: Selection confidence score
-    """
     if macro_features is None:
         X = np.array([[t_T, log_wealth_ratio, regime]], dtype=np.float32)
     else:
@@ -300,12 +247,10 @@ def predict_optimal_etf(
     if np.any(np.isnan(raw_weights)):
         raw_weights = np.ones(model.n_assets) / model.n_assets
     
-    # Apply momentum filter if prices provided
     final_weights = raw_weights.copy()
     if apply_momentum and prices is not None and etfs is not None:
         final_weights = apply_momentum_filter(raw_weights, prices, etfs)
     
-    # Select top 1 or 2 ETFs with temperature
     selected, allocation, confidence = select_etfs_with_temperature(
         final_weights, temperature=temperature, max_etfs=2
     )
