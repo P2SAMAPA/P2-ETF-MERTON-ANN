@@ -1,15 +1,13 @@
 """
 regime_detection.py — P2-ETF-MERTON-ANN
-Consensus regime detection using three windows (252, 126, 84 days).
-Each window: geometric moving average + K-means threshold.
-Majority vote decides final regime.
+Consensus regime detection with adaptive window selection.
+CHANGE #2: Selects best window based on recent Sharpe ratio performance.
 """
 
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from typing import Tuple, Dict, Any, List
-
 
 def geometric_moving_average(series: pd.Series, window: int = 252) -> pd.Series:
     """
@@ -21,7 +19,6 @@ def geometric_moving_average(series: pd.Series, window: int = 252) -> pd.Series:
     ma = log_series.rolling(window=window, min_periods=window).mean()
     return np.exp(ma)
 
-
 def detect_threshold(series: pd.Series, window: int = 252) -> float:
     """
     Compute threshold for a given window using K-means on log(geometric MA).
@@ -31,7 +28,6 @@ def detect_threshold(series: pd.Series, window: int = 252) -> float:
     gma_clean = gma.dropna()
 
     if len(gma_clean) < 10:
-        # Fallback: median of available data
         return float(gma_clean.median()) if len(gma_clean) > 0 else 20.0
 
     log_gma = np.log(gma_clean).values.reshape(-1, 1)
@@ -41,7 +37,6 @@ def detect_threshold(series: pd.Series, window: int = 252) -> float:
     threshold_log = np.mean(centers)
     return np.exp(threshold_log)
 
-
 def classify_with_window(series: pd.Series, window: int) -> pd.Series:
     """
     Classify each date using a specific window.
@@ -49,61 +44,158 @@ def classify_with_window(series: pd.Series, window: int) -> pd.Series:
     """
     threshold = detect_threshold(series, window)
     gma = geometric_moving_average(series, window)
-    # risk-on = 0 (low vol, below threshold), risk-off = 1 (high vol, above threshold)
     regime = (gma > threshold).astype(int)
-    # Fill any leading NaNs with 0 (risk-on) as safe default
     return regime.fillna(0)
 
-
-def full_regime_analysis(regime_indicator: pd.Series, windows: List[int] = None) -> Dict[str, Any]:
+# CHANGE #2: Adaptive window selection based on recent performance
+def select_best_regime_window(
+    regime_indicator: pd.Series,
+    returns: pd.Series,
+    windows: List[int] = None,
+    eval_period: int = 252
+) -> Tuple[int, Dict[str, Any]]:
     """
-    Perform consensus regime detection using multiple windows.
-    Majority vote decides final regime for each day.
-    Returns the same dictionary as before, but with regime_history as the consensus.
+    Select the regime detection window with best recent Sharpe ratio.
+    
+    Strategy: Go risk-on when regime=0, risk-off (cash/bonds) when regime=1.
+    Evaluates which window gave best Sharpe over last eval_period days.
+    
+    Args:
+        regime_indicator: VIX or MOVE series
+        returns: Benchmark returns (e.g., SPY for equity, AGG for FI)
+        windows: List of windows to test (default [21, 63, 252])
+        eval_period: Days to evaluate (default 252 = 1 year)
+    
+    Returns:
+        best_window: The window with highest Sharpe
+        window_analysis: Dict with all window performances
     """
     if windows is None:
-        windows = [252, 126, 84]
+        windows = [21, 63, 252]  # 1 month, 3 months, 12 months
+    
+    # Use recent data for evaluation
+    recent_returns = returns.iloc[-eval_period:].dropna()
+    if len(recent_returns) < 63:  # Need at least 3 months
+        return windows[-1], {"fallback": True, "reason": "insufficient_data"}
+    
+    window_scores = {}
+    
+    for w in windows:
+        # Get regime classification for this window
+        regime = classify_with_window(regime_indicator, w)
+        regime_aligned = regime.reindex(recent_returns.index, method='ffill')
+        
+        # Simple strategy: long when risk-on (regime=0), flat when risk-off (regime=1)
+        strategy_returns = recent_returns * (1 - regime_aligned)  # 1 when risk-on, 0 when risk-off
+        
+        # Calculate Sharpe (annualized)
+        mean_ret = strategy_returns.mean()
+        std_ret = strategy_returns.std()
+        sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else -999
+        
+        # Also calculate win rate (what % of time we were in market)
+        time_in_market = (1 - regime_aligned).mean()
+        
+        window_scores[w] = {
+            "sharpe": sharpe,
+            "time_in_market": time_in_market,
+            "total_return": strategy_returns.sum()
+        }
+    
+    # Select window with best Sharpe, but penalize windows that are always in or always out
+    best_sharpe = -999
+    best_window = windows[-1]  # Default to longest
+    
+    for w, scores in window_scores.items():
+        # Penalize if always in market (no regime detection value) or always out
+        if 0.1 < scores["time_in_market"] < 0.9:
+            adjusted_sharpe = scores["sharpe"]
+        else:
+            adjusted_sharpe = scores["sharpe"] - 0.5  # Penalty
+        
+        if adjusted_sharpe > best_sharpe:
+            best_sharpe = adjusted_sharpe
+            best_window = w
+    
+    return best_window, {
+        "selected_window": best_window,
+        "all_scores": window_scores,
+        "evaluation_period": eval_period
+    }
 
-    # Ensure index is datetime
+
+def full_regime_analysis(
+    regime_indicator: pd.Series, 
+    benchmark_returns: pd.Series = None,
+    windows: List[int] = None,
+    adaptive: bool = True
+) -> Dict[str, Any]:
+    """
+    Perform regime detection with adaptive window selection.
+    
+    Args:
+        regime_indicator: VIX or MOVE series
+        benchmark_returns: Optional returns for adaptive window selection
+        windows: List of windows to consider
+        adaptive: If True, use best window based on recent performance
+    
+    Returns:
+        Dict with regime analysis including selected window info
+    """
+    if windows is None:
+        windows = [252, 126, 84]  # Keep original as fallback
+
     regime_indicator = regime_indicator.copy()
     regime_indicator.index = pd.to_datetime(regime_indicator.index)
 
-    # Get classifications from each window
+    # CHANGE #2: Adaptive window selection if benchmark returns provided
+    window_analysis = None
+    if adaptive and benchmark_returns is not None and len(benchmark_returns) > 252:
+        best_window, window_analysis = select_best_regime_window(
+            regime_indicator, benchmark_returns, windows
+        )
+        primary_window = best_window
+        print(f"  Adaptive window selected: {primary_window} days")
+    else:
+        primary_window = windows[0]  # Default to first (252)
+
+    # Get classifications from each window (for consensus)
     classifications = []
     for w in windows:
         cls = classify_with_window(regime_indicator, w)
         classifications.append(cls)
 
-    # Combine into a DataFrame
     df = pd.concat(classifications, axis=1)
     df.columns = [f'window_{w}' for w in windows]
 
-    # Majority vote (rows with 0/1, sum > 1 means risk-off majority)
-    # Since there are 3 windows, majority is if sum >= 2
+    # Majority vote
     sum_votes = df.sum(axis=1)
     consensus = (sum_votes >= 2).astype(int)
-
-    # Drop any NaNs (shouldn't happen)
     consensus = consensus.dropna()
 
-    # Get current regime (last value)
     current_regime = int(consensus.iloc[-1])
 
-    # Compute semi-Markov parameters on consensus series
+    # Compute semi-Markov parameters on consensus
     semi_markov_params = estimate_semi_markov_parameters(consensus)
 
-    # Compute threshold for the primary window (252) for backward compatibility (e.g., display)
-    primary_threshold = detect_threshold(regime_indicator, windows[0])
+    # Use adaptive window's threshold for display
+    primary_threshold = detect_threshold(regime_indicator, primary_window)
 
-    return {
+    result = {
         "threshold": primary_threshold,
         "regime_history": consensus,
         "current_regime": current_regime,
         "current_regime_label": "risk-off" if current_regime == 1 else "risk-on",
         "semi_markov_params": semi_markov_params,
         "windows_used": windows,
+        "primary_window": primary_window,
         "window_classifications": {f"window_{w}": cls for w, cls in zip(windows, classifications)}
     }
+    
+    if window_analysis:
+        result["window_selection"] = window_analysis
+
+    return result
 
 
 # ----------------------------------------------------------------------
