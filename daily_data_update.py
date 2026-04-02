@@ -39,7 +39,19 @@ def fetch_fred_data(api_key, series_list, start_date="2000-01-01", end_date=None
         return pd.DataFrame()
     df = pd.DataFrame(data)
     df.index = pd.to_datetime(df.index)
+    
+    # CRITICAL FIX: Remove duplicate dates before resampling
+    if df.index.duplicated().any():
+        n_dups = df.index.duplicated().sum()
+        log.warning(f"Found {n_dups} duplicate dates in FRED data, removing")
+        df = df[~df.index.duplicated(keep='first')]
+    
     df = df.resample('D').ffill()
+    
+    # CRITICAL FIX: Remove any duplicates created by resampling
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep='first')]
+        
     return df
 
 
@@ -131,22 +143,67 @@ def update_parquet_file(dataset_file, new_row_dict, repo_id, token):
         log.warning(f"Could not download {dataset_file}: {e}. Assuming empty dataset.")
         df = pd.DataFrame()
 
+    # Normalize new_date to datetime and remove timezone info for comparison
     new_date = new_row_dict['date']
-    if not df.empty and 'date' in df.columns:
-        if new_date in pd.to_datetime(df['date']).values:
-            log.info(f"Date {new_date} already exists in {dataset_file}. Skipping append.")
+    if isinstance(new_date, str):
+        new_date = pd.to_datetime(new_date)
+    if hasattr(new_date, 'tz_localize'):
+        new_date = new_date.tz_localize(None)
+    elif hasattr(new_date, 'tz') and new_date.tz is not None:
+        new_date = new_date.tz_localize(None)
+    
+    new_row_dict['date'] = new_date
+
+    # CRITICAL FIX: Check for duplicates with proper date comparison
+    if not df.empty:
+        if 'date' in df.columns:
+            # Normalize existing dates
+            existing_dates = pd.to_datetime(df['date'])
+            # Remove timezone info
+            if existing_dates.dt.tz is not None:
+                existing_dates = existing_dates.dt.tz_localize(None)
+            
+            if new_date in existing_dates.values:
+                log.info(f"Date {new_date.date()} already exists in {dataset_file}. Skipping append.")
+                return True
+        else:
+            if 'date' not in df.columns:
+                log.warning(f"{dataset_file} missing date column, re-indexing.")
+                df = df.reset_index().rename(columns={'index': 'date'})
+
+    # CRITICAL FIX: Also check index if date is index
+    if not df.empty and df.index.name == 'date' or (isinstance(df.index, pd.DatetimeIndex) and 'date' not in df.columns):
+        existing_idx = df.index
+        if existing_idx.tz is not None:
+            existing_idx = existing_idx.tz_localize(None)
+        if new_date in existing_idx:
+            log.info(f"Date {new_date.date()} already exists in {dataset_file} index. Skipping append.")
             return True
-    else:
-        if 'date' not in df.columns and not df.empty:
-            log.warning(f"{dataset_file} missing date column, re-indexing.")
-            df = df.reset_index().rename(columns={'index': 'date'})
 
     new_row_df = pd.DataFrame([new_row_dict])
+    
+    # CRITICAL FIX: Ensure no duplicate columns
+    if any(new_row_df.columns.duplicated()):
+        dups = new_row_df.columns[new_row_df.columns.duplicated()].unique()
+        log.warning(f"Duplicate columns in new row: {dups}, keeping first occurrence")
+        new_row_df = new_row_df.loc[:, ~new_row_df.columns.duplicated()]
+    
     updated_df = pd.concat([df, new_row_df], ignore_index=True)
     updated_df = updated_df.sort_values('date').reset_index(drop=True)
+    
+    # CRITICAL FIX: Final deduplication of the entire dataset
+    if 'date' in updated_df.columns:
+        if updated_df['date'].duplicated().any():
+            n_dups = updated_df['date'].duplicated().sum()
+            log.warning(f"Found {n_dups} duplicate dates after concat, removing")
+            updated_df = updated_df.drop_duplicates(subset=['date'], keep='first')
 
     tmp_out = f"/tmp/updated_{dataset_file.replace('/', '_')}"
     updated_df.to_parquet(tmp_out, index=False)
+    
+    # Log stats
+    log.info(f"Dataset shape: {updated_df.shape}, date range: {updated_df['date'].min()} to {updated_df['date'].max()}")
+    
     upload_file(
         path_or_fileobj=tmp_out,
         path_in_repo=dataset_file,
