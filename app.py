@@ -402,6 +402,16 @@ def format_allocation(selected_etfs, allocation):
     parts = [f"{int(alloc*100)}% {etf}" for etf, alloc in zip(selected_etfs, allocation)]
     return " + ".join(parts)
 
+def safe_to_float(value):
+    """Convert value to float if possible, otherwise return None."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
@@ -751,10 +761,13 @@ with tab_history:
     if hist_eq:
         st.markdown("#### Equity Module History")
         
-        # Process history data
+        # Process history data with safe numeric conversion
         history_data = []
         for row in hist_eq:
-            actual_ret = compute_actual_return(row, price_eq) if price_eq is not None else None
+            # Compute actual return safely
+            actual_ret_raw = compute_actual_return(row, price_eq) if price_eq is not None else None
+            numeric_ret = safe_to_float(actual_ret_raw)
+            
             history_data.append({
                 'Date': row.get('date', 'N/A'),
                 'Signal Date': row.get('next_trading_date', 'N/A'),
@@ -765,8 +778,8 @@ with tab_history:
                 ),
                 'Regime': row.get('regime', 'N/A').replace('-', ' ').title(),
                 'Expected': f"{row.get('expected_return_annualized', 0)*100:.1f}%" if row.get('expected_return_annualized') else "N/A",
-                'Actual': f"{actual_ret*100:.2f}%" if actual_ret is not None else "Pending",
-                'Hit': "✅" if actual_ret and actual_ret > 0 else ("❌" if actual_ret else "⏳"),
+                'Actual': f"{numeric_ret*100:.2f}%" if numeric_ret is not None else "Pending",
+                'Hit': "✅" if numeric_ret and numeric_ret > 0 else ("❌" if numeric_ret else "⏳"),
             })
         
         df_history = pd.DataFrame(history_data)
@@ -780,8 +793,9 @@ with tab_history:
             dates = []
             for row in hist_eq:
                 ret = compute_actual_return(row, price_eq)
-                if ret is not None:
-                    returns_series.append(ret)
+                numeric_ret = safe_to_float(ret)
+                if numeric_ret is not None:
+                    returns_series.append(numeric_ret)
                     dates.append(pd.to_datetime(row.get('date')))
             
             if returns_series:
@@ -870,8 +884,9 @@ with tab_analytics:
         returns_all = []
         for row in hist_eq:
             ret = compute_actual_return(row, price_eq)
-            if ret is not None:
-                returns_all.append(ret)
+            numeric_ret = safe_to_float(ret)
+            if numeric_ret is not None:
+                returns_all.append(numeric_ret)
         
         if returns_all:
             col_stat1, col_stat2, col_stat3, col_stat4, col_stat5 = st.columns(5)
