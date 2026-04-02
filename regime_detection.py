@@ -75,6 +75,12 @@ def select_best_regime_window(
     
     # Use recent data for evaluation
     recent_returns = returns.iloc[-eval_period:].dropna()
+    
+    # CRITICAL FIX: Remove duplicate dates from index
+    if recent_returns.index.duplicated().any():
+        print(f"  Warning: Found {recent_returns.index.duplicated().sum()} duplicate dates in returns, removing duplicates")
+        recent_returns = recent_returns[~recent_returns.index.duplicated(keep='first')]
+    
     if len(recent_returns) < 63:  # Need at least 3 months
         return windows[-1], {"fallback": True, "reason": "insufficient_data"}
     
@@ -83,6 +89,11 @@ def select_best_regime_window(
     for w in windows:
         # Get regime classification for this window
         regime = classify_with_window(regime_indicator, w)
+        
+        # CRITICAL FIX: Remove duplicates from regime index too
+        if regime.index.duplicated().any():
+            regime = regime[~regime.index.duplicated(keep='first')]
+        
         regime_aligned = regime.reindex(recent_returns.index, method='ffill')
         
         # Simple strategy: long when risk-on (regime=0), flat when risk-off (regime=1)
@@ -147,6 +158,18 @@ def full_regime_analysis(
 
     regime_indicator = regime_indicator.copy()
     regime_indicator.index = pd.to_datetime(regime_indicator.index)
+    
+    # CRITICAL FIX: Remove duplicates from regime_indicator
+    if regime_indicator.index.duplicated().any():
+        print(f"  Warning: Found {regime_indicator.index.duplicated().sum()} duplicate dates in regime_indicator, removing duplicates")
+        regime_indicator = regime_indicator[~regime_indicator.index.duplicated(keep='first')]
+
+    # CRITICAL FIX: Remove duplicates from benchmark_returns if provided
+    if benchmark_returns is not None:
+        benchmark_returns = benchmark_returns.copy()
+        if benchmark_returns.index.duplicated().any():
+            print(f"  Warning: Found {benchmark_returns.index.duplicated().sum()} duplicate dates in benchmark_returns, removing duplicates")
+            benchmark_returns = benchmark_returns[~benchmark_returns.index.duplicated(keep='first')]
 
     # CHANGE #2: Adaptive window selection if benchmark returns provided
     window_analysis = None
