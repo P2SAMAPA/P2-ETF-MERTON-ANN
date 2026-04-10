@@ -29,6 +29,8 @@ EQUITY_ETFS = [
     "XLY",   # Consumer Discretionary
     "XLP",   # Consumer Staples
     "XLU",   # Utilities
+    "XLB",   # Basic Materials
+    "XLRE",  # Real Estate
     "GDX",   # Gold Miners
     "EEM",   # Emerging Markets
     "EFA",   # Developed International
