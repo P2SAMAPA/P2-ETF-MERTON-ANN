@@ -34,6 +34,8 @@ EQUITY_ETFS = [
     "GDX",   # Gold Miners
     "EEM",   # Emerging Markets
     "EFA",   # Developed International
+    "XSD",
+    "XBI",
 ]
 EQUITY_START = "2007-01-01"
 
