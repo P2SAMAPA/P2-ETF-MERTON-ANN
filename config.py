@@ -20,6 +20,7 @@ EQUITY_ETFS = [
     "IWM",   # Russell 2000 Small Cap
     "IWF",   # Russell 1000 Growth
     "IWD",   # Russell 1000 Value
+    "IWO",
     "XLK",   # Technology
     "XLF",   # Financials
     "XLE",   # Energy
