@@ -2,7 +2,7 @@ name: Daily Train + Predict
 
 on:
   schedule:
-    - cron: '0 23 * * *'  # 23:00 UTC
+    - cron: '30 01 * * *'  # 23:00 UTC
   workflow_dispatch:
 
 jobs:
