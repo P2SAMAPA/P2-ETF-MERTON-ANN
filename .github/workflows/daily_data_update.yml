@@ -3,7 +3,7 @@ name: Daily Data Update
 on:
   schedule:
     # Runs Mon-Fri at 21:30 UTC (after 4:00 PM ET US market close + buffer)
-    - cron: '30 22 * * 1-5'
+    - cron: '00 23 * * 1-5'
   workflow_dispatch:   # allow manual trigger anytime
 
 jobs:
